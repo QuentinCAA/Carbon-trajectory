@@ -7,15 +7,24 @@ Created on Fri Jul 25 07:34:46 2025
 import streamlit as st
 import pandas as pd
 from streamlit_tree_select import tree_select
-#build_tree creates a tree with all the category and the subcategory to enable the user to select some of the categories for the growth, the structural effect or the solutions
-#for now the function cant deal with None so we have to make sure than the category and sub 1 category is fully complete 
 
 def build_tree(data):
     """
-    Build a hierarchical tree from Category down to Localisation,
-    dynamically including Sub-categories and skipping missing levels.
-    The tree will have between 4 and 6 levels depending on the data.
+    Build a hierarchical tree from emission data, going from Category to Localisation.
+
+    This function constructs a nested dictionary tree using the columns:
+    Category, Sub-category 1, Sub-category 2, Sub-category 3, Name, and Localisation.
+    Missing levels are automatically skipped, allowing the tree to adapt dynamically 
+    between 4 and 6 levels depending on the data.
+
+    Parameters:
+    - data (pd.DataFrame): Input DataFrame containing the hierarchical structure of emissions.
+
+    Returns:
+    - List[Dict]: A tree structure formatted as a list of nested dictionaries with 'label',
+      'value', and optional 'children' keys, ready to be used in tree-based selection widgets.
     """
+    
     hierarchy_cols = [
         "Category",
         "Sub-category 1",
@@ -80,12 +89,23 @@ def build_tree(data):
 
     return final_tree
 
-
-
-# tree_growth_assignment enables the user to select the assignment thanks to the tree created with the previous function
-# I dont use this function because i have included it in the next one but I keep it here for now
-
 def tree_growth_assignment(data):
+    """
+    Display a tree structure to assign growth projections to selected categories.
+    
+    For each growth input defined in session state, this function shows an expandable
+    tree selector (based on the input data) allowing the user to assign the growth
+    to specific categories.
+    
+    Parameters:
+    - data (pd.DataFrame): Input DataFrame containing the full emissions data used to build the tree.
+    
+    Effects:
+    - Updates each item in st.session_state["growth_inputs"] by storing the selected tree path(s)
+      under the key 'selection_tree'.
+    - Displays one expandable section per growth entry with an interactive tree selector.
+    """
+
     tree_data = build_tree(data)
 
     st.subheader("Assign growth to categories")
@@ -106,7 +126,16 @@ def tree_growth_assignment(data):
 
 def get_label_path(row):
     """
-    Construct a full hierarchical label from a row, skipping empty or NaN fields.
+    Build a full hierarchical label from a DataFrame row, skipping empty or NaN fields.
+    
+    This function concatenates all relevant category levels from a single row 
+    into a single string separated by ' > ', omitting any missing values.
+    
+    Parameters:
+    - row (pd.Series): A row from the emissions DataFrame.
+    
+    Returns:
+    - str: A hierarchical label string representing the full path of the item.
     """
     parts = [
         row.get("Category"),
@@ -125,14 +154,20 @@ def get_label_path(row):
 
 def create_projection_base(data, years):
     """
-    Initialize the projection base with columns Value_YEAR and EF_YEAR for each year in the range.
+    Create a projection-ready DataFrame with yearly Value and Emission Factor columns.
+
+    This function initializes a new DataFrame where each row is duplicated for all 
+    target years, with columns 'Value_YEAR' and 'EF_YEAR' filled from the original data.
+    A 'Full path' column is also generated for tree-based selection and traceability.
 
     Parameters:
-    - data (DataFrame): The original dataset with columns including Category, Sub-category 1..3, Name, Location, Value, EF Value
-    - years (List[int]): List of years for which to create projection columns
+    - data (pd.DataFrame): Original dataset containing Category, Sub-category 1 to 3,
+      Name, Localisation, Value, and EF Value columns.
+    - years (List[int]): List of target years (e.g., [2025, 2026, ..., 2035]).
 
     Returns:
-    - DataFrame: Prepared projection DataFrame with per-year value and EF columns, plus a 'Full path' column
+    - pd.DataFrame: Projection-ready DataFrame with one row per item and year,
+      containing 'Value_YEAR', 'EF_YEAR', and a 'Full path' column.
     """
     base = []
 

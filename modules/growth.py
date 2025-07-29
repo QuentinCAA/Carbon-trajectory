@@ -5,20 +5,30 @@ Created on Fri Jul 25 07:38:30 2025
 @author: quent
 """
 import streamlit as st
-import pandas as pd
 from streamlit_tree_select import tree_select
-from modules.tree import build_tree, get_label_path
-
-#create_projection_base creates the dataframe with all the year from 2025 to 2035 and the EF and value data that will be impacted by the growths, the solutions and the structural effects
-
-
-
-
+from modules.tree import build_tree
 
 def create_growth(years):
     """
-    Create a new growth or budget-based projection.
+    Create a new growth-based or budget-based projection and store it in session state.
+    
+    This function displays a form where the user can define a projection by either
+    specifying a fixed growth percentage or a budget evolution over time. The form
+    supports optional intermediate budget points and stores the result in session state.
+    
+    Parameters:
+    - years (List[int]): List of target years, including the start and end years for the projection.
+    
+    Effects:
+    - Updates st.session_state["growth_inputs"] with a new projection object containing:
+        - 'name': The label of the projection.
+        - 'mode': Either "Growth %" or "Budget Projection".
+        - 'growth': Growth percentage (if applicable).
+        - 'budget': Dictionary of budgets per year (if applicable).
+        - 'categories': Placeholder for future tree-based category assignment.
+    - Displays success confirmation in the Streamlit interface.
     """
+    
     st.subheader("Create a new growth or budget projection")
 
     if "growth_inputs" not in st.session_state:
@@ -75,7 +85,22 @@ def create_growth(years):
 
 def assign_growth(data):
     """
-    Allow user to assign categories to existing growth or budget projections.
+    Allow the user to assign categories to existing growth or budget projections.
+    
+    This function displays each existing projection in a form, using a two-column layout
+    for better visual balance. Users can review projection details and assign categories
+    through an interactive tree selector.
+    
+    Parameters:
+    - data (pd.DataFrame): Emissions data used to construct the hierarchical tree structure.
+    
+    Effects:
+    - For each projection in st.session_state["growth_inputs"], displays a form with:
+        - Projection name and type (Growth % or Budget).
+        - Existing growth or budget values.
+        - A tree selector for assigning categories.
+    - Updates the 'categories' field of each projection based on user selections.
+    - Displays confirmation messages when changes are saved.
     """
     st.subheader("Assign growth or budget projections to categories")
 
@@ -84,9 +109,13 @@ def assign_growth(data):
         return
 
     tree = build_tree(data)
+    col1, col2 = st.columns(2)
 
     for i, g in enumerate(st.session_state.growth_inputs):
-        with st.form(f"assign_growth_{i}"):
+        # Alternate between columns
+        col = col1 if i % 2 == 0 else col2
+
+        with col.form(f"assign_growth_{i}"):
             st.markdown(f"### 🛠️ {g['name']} ({g['mode']})")
 
             if g["mode"] == "Growth %":
@@ -105,13 +134,24 @@ def assign_growth(data):
                 st.success("✅ Categories updated.")
 
 
+
 def apply_projections_to_base(projection_df, years):
     """
-    Apply growth or budget projections from session state to the projection DataFrame.
+    Apply growth or budget projections to the projection DataFrame based on user-defined inputs.
+
+    For each growth or budget projection stored in session state, this function updates
+    the Value_YEAR columns of rows whose full hierarchical path matches the selected categories.
+    It supports two modes:
+    - Growth %: Applies exponential growth from the start year.
+    - Budget Projection: Applies year-by-year budget scaling, with interpolation or extrapolation
+      if some years are missing.
 
     Parameters:
-    - projection_df (DataFrame): DataFrame with Value_YEAR columns.
-    - years (List[int]): List of projection years, e.g. [2025, 2026, ..., 2035]
+    - projection_df (pd.DataFrame): DataFrame containing one row per item, with Value_YEAR columns.
+    - years (List[int]): List of target years (e.g., [2025, 2026, ..., 2035]).
+
+    Returns:
+    - pd.DataFrame: Updated projection DataFrame with adjusted Value_YEAR values.
     """
     if "growth_inputs" not in st.session_state:
         return projection_df
@@ -183,8 +223,20 @@ def apply_projections_to_base(projection_df, years):
 
 def check_projection_coverage(projected_df):
     """
-    Check whether each row in the projection table is covered by exactly one growth or budget projection.
-    Show warning messages if some rows are missing projections or have conflicting ones.
+    Verify that each row in the projection table is covered by exactly one growth or budget projection.
+
+    This function checks whether every item in the projected DataFrame is associated with
+    a single projection based on the assigned category tree. It identifies two types of issues:
+    - Rows without any assigned projection.
+    - Rows matched by multiple projections.
+
+    Parameters:
+    - projected_df (pd.DataFrame): DataFrame containing the projection data, including a 'Full path' column.
+
+    Effects:
+    - Displays Streamlit warnings for rows with missing or overlapping projections.
+    - Shows a maximum of 30 individual warnings for readability.
+    - Displays a success message if all rows are correctly covered.
     """
     warnings = []
 
@@ -215,7 +267,3 @@ def check_projection_coverage(projected_df):
             st.markdown(f"...and {len(warnings) - 30} more.")
     else:
         st.success("✅ All rows are correctly covered by exactly one growth/budget projection.")
-
-
-
-

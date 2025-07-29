@@ -8,12 +8,19 @@ import streamlit as st
 from streamlit_tree_select import tree_select
 from modules.tree import build_tree
 
-#add_structural_effect: to give the possibilty to the user to add effects if he needs to
-#Choice made : work with % and only one % for each structural effect (no way yet to create a more complex effect)
-
-#init_structural_effects : i have put the structural effects i remember but need a double check
-
 def init_structural_effects():
+    """
+    Initialise the default list of structural effects in session state if not already defined.
+    
+    Structural effects are predefined emission multipliers applied to specific categories 
+    (e.g. electricity, aviation). Each effect includes a name, a multiplier value, and a list
+    of associated categories (initially empty).
+    
+    Effects:
+    - Adds a 'structural_effects' key to st.session_state if it does not exist.
+    - The default list includes predefined effects with typical emission multipliers.
+    """
+    
     if "structural_effects" not in st.session_state:
         st.session_state.structural_effects = [
             {"name": "Electricity from the grid", "value": 1.13, "categories": []},
@@ -23,11 +30,20 @@ def init_structural_effects():
             {"name": "Procurement of services", "value": 2.32, "categories": []}]
         
 
-
 def create_structural_effect():
     """
-    UI for creating a new structural effect with a name and multiplier.
+    Display a form to create a new structural effect and store it in session state.
+    
+    A structural effect represents a multiplicative change in emissions (e.g. reduction by 20%)
+    that can later be assigned to categories. This function lets the user define its name
+    and multiplier, then saves it to the list of structural effects.
+    
+    Effects:
+    - Displays a form to enter the effect name and multiplier value.
+    - Appends the new effect to st.session_state["structural_effects"] with an empty category selection.
+    - Shows a confirmation message upon successful creation.
     """
+    
     st.subheader("Create a new structural effect")
 
     with st.form("form_create_structural_effect"):
@@ -51,9 +67,20 @@ def create_structural_effect():
 
 def assign_structural_effects(data):
     """
-    Display and configure existing structural effects,
-    allowing category assignment via tree and editing the multiplier.
+    Display and configure existing structural effects, including category assignment and multiplier editing.
+    
+    This function renders each structural effect in a form distributed across three columns.
+    Users can adjust the multiplier and select categories using an interactive tree view.
+    
+    Parameters:
+    - data (pd.DataFrame): Emissions dataset used to build the hierarchical category tree.
+    
+    Effects:
+    - Displays a form for each effect, showing its name, multiplier input, and tree selector.
+    - Updates st.session_state["structural_effects"] with the edited multiplier and selected categories.
+    - Shows success messages upon saving changes.
     """
+    
     st.subheader("Assign structural effects to categories")
 
     if "structural_effects" not in st.session_state or not st.session_state.structural_effects:
@@ -61,13 +88,15 @@ def assign_structural_effects(data):
         return
 
     tree = build_tree(data)
+    cols = st.columns(3)  # Create 3 side-by-side columns
 
     for i, effect in enumerate(st.session_state.structural_effects):
-        # Clean up effect name for form ID
         import re
-        form_id = re.sub(r"\W+", "_", effect["name"])
+        form_id = re.sub(r"\W+", "_", effect["name"])  # Clean name for form ID
 
-        with st.form(f"form_edit_structural_{form_id}"):
+        col = cols[i % 3]  # Distribute forms across the 3 columns
+
+        with col.form(f"form_edit_structural_{form_id}"):
             st.markdown(f"### ⚙️ `{effect['name']}`")
 
             new_value = st.number_input(
@@ -94,12 +123,21 @@ def assign_structural_effects(data):
 
 
 
-
 def apply_structural_effects(data):
     """
-    Apply structural effects (percentage evolution of EF) to the projection DataFrame.
-    Effects are applied cumulatively year after year to EF columns.
+    Apply structural effects to Emission Factor (EF) columns in the projection DataFrame.
+    
+    For each row, the function identifies applicable structural effects based on category
+    assignment. The effects are applied cumulatively to EF columns year by year 
+    (starting from the second year), using the previous year's value multiplied by the effect(s).
+    
+    Parameters:
+    - data (pd.DataFrame): Projection DataFrame containing EF_YEAR columns and a 'Full path' column.
+    
+    Returns:
+    - pd.DataFrame: Updated DataFrame with structural effects applied to EF_YEAR columns.
     """
+    
     if "structural_effects" not in st.session_state:
         return data
 
@@ -147,8 +185,19 @@ def apply_structural_effects(data):
 def check_structural_coverage(data):
     """
     Check that each Full path is affected by at most one structural effect.
-    Warn if any row is affected by more than one.
+
+    This function verifies that no row in the emissions dataset is assigned to
+    multiple structural effects. If overlaps are found (i.e. a Full path appears
+    in more than one effect), a warning is displayed listing all conflicts.
+
+    Parameters:
+    - data (pd.DataFrame): Dataset containing a 'Full path' column for each emission source.
+
+    Effects:
+    - Displays warnings in Streamlit for all rows affected by more than one structural effect.
+    - Displays a success message if no overlaps are found.
     """
+    
     if "structural_effects" not in st.session_state:
         return
 
