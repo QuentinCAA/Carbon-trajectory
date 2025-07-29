@@ -4,6 +4,4 @@ numpy
 pandas
 plotly
 openpyxl
-streamlit_tree_select
-io
-json
+git+https://github.com/okld/streamlit-tree-select.git
