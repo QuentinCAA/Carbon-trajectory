@@ -64,23 +64,7 @@ def create_structural_effect():
             st.session_state.structural_effects.append(new_effect)
             st.success(f"✅ Structural effect '{name}' added.")
 
-
 def assign_structural_effects(data):
-    """
-    Display and configure existing structural effects, including category assignment and multiplier editing.
-    
-    This function renders each structural effect in a form distributed across three columns.
-    Users can adjust the multiplier and select categories using an interactive tree view.
-    
-    Parameters:
-    - data (pd.DataFrame): Emissions dataset used to build the hierarchical category tree.
-    
-    Effects:
-    - Displays a form for each effect, showing its name, multiplier input, and tree selector.
-    - Updates st.session_state["structural_effects"] with the edited multiplier and selected categories.
-    - Shows success messages upon saving changes.
-    """
-    
     st.subheader("Assign structural effects to categories")
 
     if "structural_effects" not in st.session_state or not st.session_state.structural_effects:
@@ -88,13 +72,12 @@ def assign_structural_effects(data):
         return
 
     tree = build_tree(data)
-    cols = st.columns(3)  # Create 3 side-by-side columns
+    cols = st.columns(3)
 
     for i, effect in enumerate(st.session_state.structural_effects):
         import re
-        form_id = re.sub(r"\W+", "_", effect["name"])  # Clean name for form ID
-
-        col = cols[i % 3]  # Distribute forms across the 3 columns
+        form_id = re.sub(r"\W+", "_", effect["name"])
+        col = cols[i % 3]
 
         with col.form(f"form_edit_structural_{form_id}"):
             st.markdown(f"### ⚙️ `{effect['name']}`")
@@ -114,12 +97,14 @@ def assign_structural_effects(data):
                 key=f"tree_struct_{effect['name']}"
             )
 
-            submitted = st.form_submit_button("Save configuration")
+            # 💡 Mise à jour AVANT le bouton
+            st.session_state.structural_effects[i]["value"] = new_value
+            st.session_state.structural_effects[i]["categories"] = selection
 
+            submitted = st.form_submit_button("Save configuration")
             if submitted:
-                st.session_state.structural_effects[i]["value"] = new_value
-                st.session_state.structural_effects[i]["categories"] = selection
                 st.success(f"✅ Configuration for '{effect['name']}' saved.")
+
 
 
 

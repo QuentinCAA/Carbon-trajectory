@@ -60,7 +60,7 @@ from modules.growth import create_growth, assign_growth , apply_projections_to_b
 from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage
 from modules.solutions import init_solutions, select_solution, apply_solutions, create_solution, compute_avoided_emissions, compute_emissions_per_year
 from modules.solutions import build_diagnostic_weights_table, build_solution_weights_table, compute_solution_impact_from_diagnostic
-
+from modules.visualisation import plot_cumulative_emissions_reduction
 
 # Activate wide layout mode to reduce side margins (must be the first Streamlit command)
 st.set_page_config(layout="wide")
@@ -252,8 +252,12 @@ with tabs[3]:
 
         # If you want to display some table
         
-        #st.markdown("### 🔢 Emissions BEFORE solutions")
-        #st.dataframe(df_emissions_before[[f"Emissions_{y}" for y in years]], use_container_width=True)
+        st.markdown("### 🔢 Emissions BEFORE solutions")
+        st.dataframe(df_emissions_before[[f"Emissions_{y}" for y in years]], use_container_width=True)
+        df_only_emissions_before = df_emissions_before[[f"Emissions_{y}" for y in years]]
+        st.write(df_only_emissions_before.dtypes)
+        st.write(df_only_emissions_before.head())
+
 
         #st.markdown("### 🔢 Emissions AFTER solutions")
         #st.dataframe(df_emissions_after[[f"Emissions_{y}" for y in years]], use_container_width=True)
@@ -282,6 +286,22 @@ with tabs[3]:
 
 with tabs[4]:
     st.title("Visualisations")
+    
+    if has_loaded_data():
+        solution_colors = {
+    'Privilégier des fournisseurs green': '#00bfc4',
+    'Réduction des achats': '#f8766d',
+    'Change Avion to Train': '#7cae00'
+}
+        
+        fig = plot_cumulative_emissions_reduction(
+            emissions_before_df=df_emissions_before,
+            reductions_by_solution_df=impact_df,
+            solution_colors=solution_colors,
+            show_percentage_annotation=True
+        )
+        
+        st.pyplot(fig)
 
 # =========================================
 # Tab 6: Export
