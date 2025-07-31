@@ -60,7 +60,7 @@ from modules.growth import create_growth, assign_growth , apply_projections_to_b
 from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage
 from modules.solutions import init_solutions, select_solution, apply_solutions, create_solution, compute_avoided_emissions, compute_emissions_per_year
 from modules.solutions import build_diagnostic_weights_table, build_solution_weights_table, compute_solution_impact_from_diagnostic
-from modules.visualisation import plot_cumulative_emissions_reduction
+from modules.visualisation import plot_cumulative_emissions_reduction, plot_annual_emissions_reduction
 
 # Activate wide layout mode to reduce side margins (must be the first Streamlit command)
 st.set_page_config(layout="wide")
@@ -302,6 +302,20 @@ with tabs[4]:
         )
         
         st.pyplot(fig)
+        
+        st.header("📉 Annual CO2e Emissions with and without Actions")
+
+        # Call the plotting function
+        fig_annual = plot_annual_emissions_reduction(
+            emissions_before_df=df_emissions_before,
+            reductions_by_solution_df=impact_df,
+            solution_colors=solution_colors,
+            show_percentage_annotation=True  # Optional
+            )
+        
+        st.pyplot(fig_annual)
+
+
 
 # =========================================
 # Tab 6: Export
