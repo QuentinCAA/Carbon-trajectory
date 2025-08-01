@@ -364,7 +364,7 @@ def apply_solutions(df, years):
     modified_df = df.copy()
 
     for sol in st.session_state.solutions:
-        st.markdown(f"#### 🛠️ Applying solution: {sol['name']}")
+        #st.markdown(f"#### 🛠️ Applying solution: {sol['name']}")
         #st.json(sol)
 
         impact_max = sol.get("impact_max", 0)

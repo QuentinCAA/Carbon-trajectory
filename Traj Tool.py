@@ -258,11 +258,11 @@ with tabs[3]:
 
         # If you want to display some table
         
-        st.markdown("### 🔢 Emissions BEFORE solutions")
-        st.dataframe(df_emissions_before[[f"Emissions_{y}" for y in years]], use_container_width=True)
+        #st.markdown("### 🔢 Emissions BEFORE solutions")
+        #st.dataframe(df_emissions_before[[f"Emissions_{y}" for y in years]], use_container_width=True)
         df_only_emissions_before = df_emissions_before[[f"Emissions_{y}" for y in years]]
-        st.write(df_only_emissions_before.dtypes)
-        st.write(df_only_emissions_before.head())
+        #st.write(df_only_emissions_before.dtypes)
+        #st.write(df_only_emissions_before.head())
 
 
         #st.markdown("### 🔢 Emissions AFTER solutions")
@@ -330,7 +330,7 @@ with tabs[5]:
         # To choose the export file's name
         file_name = st.text_input("Choose a name for your session file (without extension)", value="carbon_session")
 
-        keys_to_save = ['solutions','growth_inputs','structural_effects','growth_assignments','structural_assignments','category_colors']
+        keys_to_save = ['solutions','growth_inputs','structural_effects','growth_assignments','structural_assignments','category_colors','solution_colors']
 
         session_to_export = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
 
