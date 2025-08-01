@@ -293,7 +293,7 @@ with tabs[3]:
 with tabs[4]:
     st.title("Visualisations")
     
-    if has_loaded_data():
+    if has_loaded_data() and not impact_df.empty:
         solutions = list(impact_df.index)
         choose_solution_colors(solutions)
 

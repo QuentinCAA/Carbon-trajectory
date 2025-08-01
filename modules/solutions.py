@@ -201,24 +201,38 @@ def select_solution(data, years):
             selected_solution["start_year"] = start_year
 
             available_years = [y for y in years if y >= start_year]
-
+            
+            
             # Set implementation levels
             st.markdown("### Define implementation level per year")
+            
             selected_years = st.multiselect(
                 "Select target years",
                 available_years,
                 default=sorted(int(y) for y in selected_solution.get("years_targets", {}).keys() if int(y) in available_years)
             )
-
+            
+            # Unique prefix to differentiate keys across solutions
+            solution_key_prefix = f"impl_{selected_name}"
+            
             year_targets = {}
+            
             for y in selected_years:
+                key = f"{solution_key_prefix}_{y}"
+                default_pct = int(selected_solution.get("years_targets", {}).get(str(y), 0) * 100)
+            
+                # Ensure session_state is initialized
+                if key not in st.session_state:
+                    st.session_state[key] = default_pct
+            
                 pct = st.slider(
                     f"Implementation for {y} (% of max effect)",
                     0, 100,
-                    int(selected_solution.get("years_targets", {}).get(str(y), 0) * 100),
-                    key=f"{selected_name}_{y}"
+                    key=key
                 )
+            
                 year_targets[y] = pct / 100
+
 
             # Assign categories depending on type
             tree = build_tree(data)
