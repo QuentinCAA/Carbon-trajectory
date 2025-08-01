@@ -24,8 +24,13 @@ Created on Wed Jul 23 13:47:39 2025
 
 ## To Do
 
-#- [ ] Review code and comment properly
+
 #- [ ] Display nice charts
+#- [ ] Give the possibility to export data for financial trajectory (tableau excel avec growths et solutions avec ttes les infos disponibles pour les deux)
+
+#- [ ] Create an utilisation guide (with screenshots) and buy doing so also facilitate the user experience with more explanations at the start of each "onglet"
+#- [ ] Create some examples json to serve as example and be available to train/understand in the previous guide
+
 #- [ ] Clarify databefore and dataafter to calculate the reduction with growth and structural effects differents roles (voir avec Paolo)
 
 
@@ -38,6 +43,7 @@ Created on Wed Jul 23 13:47:39 2025
 #- [X] Display the impact of each solution
 #- [X] Display projected values by name and year
 #- [X] Allow export of a file to avoid starting from scratch
+#- [X] Review code and comment properly
 
 
 ## Futur improvement
@@ -60,7 +66,7 @@ from modules.growth import create_growth, assign_growth , apply_projections_to_b
 from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage
 from modules.solutions import init_solutions, select_solution, apply_solutions, create_solution, compute_avoided_emissions, compute_emissions_per_year
 from modules.solutions import build_diagnostic_weights_table, build_solution_weights_table, compute_solution_impact_from_diagnostic
-from modules.visualisation import plot_cumulative_emissions_reduction, plot_annual_emissions_reduction
+from modules.visualisation import choose_solution_colors ,plot_cumulative_emissions_reduction, plot_annual_emissions_reduction,prepare_waterfall_inputs ,plot_waterfall_emissions
 
 # Activate wide layout mode to reduce side margins (must be the first Streamlit command)
 st.set_page_config(layout="wide")
@@ -288,32 +294,28 @@ with tabs[4]:
     st.title("Visualisations")
     
     if has_loaded_data():
-        solution_colors = {
-    'Privilégier des fournisseurs green': '#00bfc4',
-    'Réduction des achats': '#f8766d',
-    'Change Avion to Train': '#7cae00'
-}
-        
-        fig = plot_cumulative_emissions_reduction(
-            emissions_before_df=df_emissions_before,
-            reductions_by_solution_df=impact_df,
-            solution_colors=solution_colors,
-            show_percentage_annotation=True
-        )
+        solutions = list(impact_df.index)
+        choose_solution_colors(solutions)
+
+        # You can now pass this to your plotting function
+        solution_colors = st.session_state.solution_colors
+      
+        fig = plot_cumulative_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
         
         st.pyplot(fig)
-        
-        st.header("📉 Annual CO2e Emissions with and without Actions")
 
-        # Call the plotting function
-        fig_annual = plot_annual_emissions_reduction(
-            emissions_before_df=df_emissions_before,
-            reductions_by_solution_df=impact_df,
-            solution_colors=solution_colors,
-            show_percentage_annotation=True  # Optional
-            )
+        fig_annual = plot_annual_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
         
         st.pyplot(fig_annual)
+        
+        start_value, steps, labels, colors = prepare_waterfall_inputs(df_emissions_before,impact_df,solution_colors)
+        
+        fig_waterfall = plot_waterfall_emissions(start_value,steps,labels,colors)
+        
+        st.pyplot(fig_waterfall)
+
+
+
 
 
 
@@ -340,6 +342,39 @@ with tabs[5]:
         buffer = BytesIO(json_bytes)
 
         st.download_button(label="📥 Download session as JSON",data=buffer,file_name=f"{file_name}.json", mime="application/json")
+        
+    
+
+        # Button to export Excel
+        if st.button("📈 Export solutions & growths as Excel"):
+            with pd.ExcelWriter("carbon_export.xlsx") as writer:
+                # Convert to DataFrames if necessary
+                if "solutions" in st.session_state:
+                    pd.DataFrame(st.session_state["solutions"]).to_excel(writer, sheet_name="Solutions", index=False)
+        
+                if "growth_inputs" in st.session_state:
+                    pd.DataFrame(st.session_state["growth_inputs"]).to_excel(writer, sheet_name="Growth Inputs", index=False)
+        
+                if "structural_effects" in st.session_state:
+                    pd.DataFrame(st.session_state["structural_effects"]).to_excel(writer, sheet_name="Structural Effects", index=False)
+        
+                if "growth_assignments" in st.session_state:
+                    pd.DataFrame(st.session_state["growth_assignments"]).to_excel(writer, sheet_name="Growth Assignments", index=False)
+        
+                if "structural_assignments" in st.session_state:
+                    pd.DataFrame(st.session_state["structural_assignments"]).to_excel(writer, sheet_name="Structural Assignments", index=False)
+        
+            # Read written Excel file into memory for download
+            with open("carbon_export.xlsx", "rb") as f:
+                excel_bytes = f.read()
+        
+            st.download_button(
+                label="📥 Download Excel",
+                data=excel_bytes,
+                file_name="carbon_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
     else:
         st.info("You need to upload or restore a dataset before saving.")
        
