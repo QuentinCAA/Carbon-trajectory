@@ -294,25 +294,31 @@ with tabs[4]:
     st.title("Visualisations")
     
     if has_loaded_data() and not impact_df.empty:
-        solutions = list(impact_df.index)
-        choose_solution_colors(solutions)
-
-        # You can now pass this to your plotting function
-        solution_colors = st.session_state.solution_colors
-      
-        fig = plot_cumulative_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
         
-        st.pyplot(fig)
-
-        fig_annual = plot_annual_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
+        col1,col2 = st.columns(2)
         
-        st.pyplot(fig_annual)
+        with col1:
+            solutions = list(impact_df.index)
+            choose_solution_colors(solutions)
+    
+            # You can now pass this to your plotting function
+            solution_colors = st.session_state.solution_colors
+          
+            fig_cumulate = plot_cumulative_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
+            
+            st.pyplot(fig_cumulate)
         
-        start_value, steps, labels, colors = prepare_waterfall_inputs(df_emissions_before,impact_df,solution_colors)
-        
-        fig_waterfall = plot_waterfall_emissions(start_value,steps,labels,colors)
-        
-        st.pyplot(fig_waterfall)
+        with col2:
+    
+            fig_annual = plot_annual_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
+            
+            st.pyplot(fig_annual)
+            
+            start_value, steps, labels, colors = prepare_waterfall_inputs(df_emissions_before,impact_df,solution_colors)
+            
+            fig_waterfall = plot_waterfall_emissions(start_value,steps,labels,colors)
+            
+            st.pyplot(fig_waterfall)
 
 
 
