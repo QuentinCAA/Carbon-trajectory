@@ -23,11 +23,11 @@ def init_structural_effects():
     
     if "structural_effects" not in st.session_state:
         st.session_state.structural_effects = [
-            {"name": "Electricity from the grid", "value": 1.13, "categories": []},
-            {"name": "Aviation", "value": 2.0, "categories": []},
-            {"name": "International maritime transport", "value": 2.0, "categories": []},
-            {"name": "Procurement of goods", "value": 3.43, "categories": []},
-            {"name": "Procurement of services", "value": 2.32, "categories": []}]
+            {"name": "Electricity from the grid", "value": 0.99, "categories": []},
+            {"name": "Aviation", "value": 0.97, "categories": []},
+            {"name": "International maritime transport", "value": 0.98, "categories": []},
+            {"name": "Procurement of goods", "value": 0.96, "categories": []},
+            {"name": "Procurement of services", "value": 0.97, "categories": []}]
         
 
 def create_structural_effect():

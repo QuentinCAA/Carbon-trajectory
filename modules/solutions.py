@@ -57,6 +57,329 @@ def init_solutions():
             }
         ]
         
+
+def create_solution():
+    """
+    Display a form to create a new mitigation solution and store it in session state.
+    
+    Users can define a solution by setting its name, type (simple or mixed), target field,
+    and maximum possible impact. For mixed solutions, additional placeholders are initialized
+    for reduction and increase configurations.
+    
+    Effects:
+    - Displays a form for entering solution details.
+    - Appends the new solution to st.session_state["solutions"].
+    - Also registers the new entry in st.session_state["solutions_table"].
+    - Shows a success message upon creation.
+    """
+    import streamlit as st
+
+    st.subheader("➕ Create a new solution")
+
+    with st.form("create_solution_form"):
+        name = st.text_input("Name of the solution")
+        solution_type = st.selectbox("Type of solution", ["simple", "mixed"])
+        impact_max = st.slider("Maximum possible impact (0 = no effect, 1 = full effect)", 0.0, 1.0, 0.5)
+        target = st.selectbox("Target field", ["EF", "Value"])
+
+        submitted = st.form_submit_button("Add solution")
+
+        if submitted and name:
+            new_solution = {
+                "name": name,
+                "type": solution_type,
+                "impact_max": impact_max,
+                "target": target,
+                "years_targets": {},
+                "categories": {}
+            }
+
+            # For mixed solutions, add placeholders
+            if solution_type == "mixed":
+                new_solution["reduction"] = {"categories": {}}
+                new_solution["increase"] = {"categories": {}, "conversion_factor": 1.0}
+
+            # Ensure the list exists and append
+            if "solutions" not in st.session_state:
+                st.session_state.solutions = []
+
+            st.session_state.solutions.append(new_solution)
+
+            # ✅ Register in central table for yearly targets
+            if "solutions_table" not in st.session_state:
+                st.session_state.solutions_table = {}
+            st.session_state.solutions_table[name] = {}
+
+            st.success(f"✅ Solution '{name}' ({solution_type}) created successfully.")
+
+
+
+
+def select_solution(data, years):
+    """
+    Configure all mitigation solutions (simple or mixed) via independent forms.
+    
+    Each solution has its own form. Updates are written directly to
+    st.session_state.solutions[i] without rebuilding any lists or external tables.
+    """
+
+    import streamlit as st
+    import re
+
+    st.subheader("⚙️ Configure existing solutions")
+
+    # Safety check
+    if "solutions" not in st.session_state or not st.session_state.solutions:
+        st.info("No solutions available yet. Please create one first.")
+        return
+
+    # Build hierarchical tree of categories
+    tree = build_tree(data)
+    cols = st.columns(3)
+
+    # One form per solution
+    for i, sol in enumerate(st.session_state.solutions):
+        form_id = re.sub(r"\W+", "_", sol["name"])
+        col = cols[i % 3]
+
+        with col.form(f"form_edit_solution_{form_id}"):
+            st.markdown(f"### 💡 `{sol['name']}`")
+            st.markdown(f"- Type: `{sol['type']}` | Target: `{sol['target']}`")
+
+            # --- Maximum impact
+            new_impact = st.slider(
+                "Maximum impact (theoretical limit)",
+                0.0, 1.0,
+                sol.get("impact_max", 1.0),
+                step=0.05,
+                key=f"impact_{sol['name']}"
+            )
+            st.session_state.solutions[i]["impact_max"] = new_impact
+
+            # --- Start year
+            start_year = st.selectbox(
+                "Start year",
+                years,
+                index=years.index(sol.get("start_year", years[0]))
+                if sol.get("start_year") in years else 0,
+                key=f"start_{sol['name']}"
+            )
+            st.session_state.solutions[i]["start_year"] = start_year
+
+            # --- Implementation per year
+            available_years = [y for y in years if y >= start_year]
+            st.markdown("### Implementation level per year")
+
+            year_targets = sol.get("years_targets", {})
+            local_targets = {}
+
+            selected_years = st.multiselect(
+                "Select target years",
+                available_years,
+                default=sorted(int(y) for y in year_targets.keys()),
+                key=f"years_{sol['name']}"
+            )
+
+            for y in selected_years:
+                pct = st.slider(
+                    f"{y} (% of max effect)",
+                    0, 100,
+                    int(year_targets.get(str(y), 0) * 100),
+                    key=f"{sol['name']}_impl_{y}"
+                )
+                local_targets[str(y)] = pct / 100.0
+
+            st.session_state.solutions[i]["years_targets"] = local_targets
+
+            # --- Category trees
+            if sol["type"] == "simple":
+                st.markdown("### Categories impacted by this solution")
+                selection = tree_select(
+                    tree,
+                    checked=sol.get("categories", {}).get("checked", []),
+                    expanded=sol.get("categories", {}).get("expanded", []),
+                    key=f"tree_simple_{sol['name']}"
+                )
+                st.session_state.solutions[i]["categories"] = selection
+
+            elif sol["type"] == "mixed":
+                st.markdown("### 📉 Categories to reduce")
+                reduction = tree_select(
+                    tree,
+                    checked=sol.get("reduction", {}).get("categories", {}).get("checked", []),
+                    expanded=sol.get("reduction", {}).get("categories", {}).get("expanded", []),
+                    key=f"tree_red_{sol['name']}"
+                )
+
+                st.markdown("### 📈 Categories to increase")
+                increase = tree_select(
+                    tree,
+                    checked=sol.get("increase", {}).get("categories", {}).get("checked", []),
+                    expanded=sol.get("increase", {}).get("categories", {}).get("expanded", []),
+                    key=f"tree_inc_{sol['name']}"
+                )
+
+                factor = st.number_input(
+                    "Conversion factor (increase units per reduced unit)",
+                    min_value=0.01,
+                    format="%.2f",
+                    value=sol.get("increase", {}).get("conversion_factor", 1.0),
+                    key=f"factor_{sol['name']}"
+                )
+
+                st.session_state.solutions[i]["reduction"] = {"categories": reduction}
+                st.session_state.solutions[i]["increase"] = {
+                    "categories": increase,
+                    "conversion_factor": factor
+                }
+
+            # --- Save button (does not rebuild, just confirms)
+            submitted = st.form_submit_button("Save configuration")
+            if submitted:
+                st.success(f"✅ Configuration for '{sol['name']}' saved.")
+
+
+    
+
+
+
+def apply_solutions(df, years):
+    """
+    Apply all configured mitigation solutions (simple and mixed) to the projection DataFrame.
+
+    Uses both 'impact_max' and 'years_targets' to compute the proportional effect
+    on EF or Value fields.
+
+    Parameters:
+    - df (pd.DataFrame): Projection DataFrame with 'Value_YEAR' and 'EF_YEAR' columns.
+    - years (List[int]): Projection years.
+
+    Returns:
+    - pd.DataFrame: Updated DataFrame with solutions applied.
+    """
+    if "solutions" not in st.session_state or not st.session_state.solutions:
+        return df
+
+    modified_df = df.copy()
+
+    for sol in st.session_state.solutions:
+        impact_max = sol.get("impact_max", 0)
+        target_field = sol.get("target", "EF")
+
+        if sol["type"] == "simple":
+            raw_targets = sol.get("years_targets", {})
+            start_year = sol.get("start_year", years[0])
+            interpolated_targets = interpolate_targets(raw_targets, years, start_year)
+            selected = set(sol.get("categories", {}).get("checked", []))
+
+            for idx, row in modified_df.iterrows():
+                full_label = get_label_path(row)
+                if is_subpath(full_label, selected):
+                    for year in years:
+                        col = f"{target_field}_{year}"
+                        if col in modified_df.columns:
+                            reduction = impact_max * interpolated_targets.get(year, 0.0)
+                            before = modified_df.at[idx, col]
+                            modified_df.at[idx, col] = before * (1 - reduction)
+
+        elif sol["type"] == "mixed":
+            reduction_paths = set(sol.get("reduction", {}).get("categories", {}).get("checked", []))
+            increase_paths = set(sol.get("increase", {}).get("categories", {}).get("checked", []))
+            factor = sol.get("increase", {}).get("conversion_factor", 1.0)
+
+            raw_targets = sol.get("years_targets", {})
+            start_year = sol.get("start_year", years[0])
+            interpolated_targets = interpolate_targets(raw_targets, years, start_year)
+            yearly_reductions = {y: 0.0 for y in years}
+
+            # --- Phase 1: apply reductions
+            for idx, row in modified_df.iterrows():
+                full_label = get_label_path(row)
+                if is_subpath(full_label, reduction_paths):
+                    for year in years:
+                        col = f"{target_field}_{year}"
+                        if col in modified_df.columns:
+                            reduction = impact_max * interpolated_targets.get(year, 0.0)
+                            before = modified_df.at[idx, col]
+                            delta = before * reduction
+                            modified_df.at[idx, col] = before - delta
+                            yearly_reductions[year] += delta
+
+            # --- Phase 2: redistribute increases
+            affected_rows = [
+                idx for idx, row in modified_df.iterrows()
+                if is_subpath(get_label_path(row), increase_paths)
+            ]
+
+            for year in years:
+                col = f"{target_field}_{year}"
+                total_increase = yearly_reductions[year] * factor
+                if affected_rows:
+                    per_row_increase = total_increase / len(affected_rows)
+                    for idx in affected_rows:
+                        modified_df.at[idx, col] += per_row_increase
+
+    return modified_df
+
+
+
+def build_solution_weights_table(df, years, st_session_solutions):
+    """
+    Build weight tables showing how each solution contributes to each row and year.
+
+    The weight for each solution = impact_max × interpolated(year_target).
+    These weights are later used for detailed emission attribution.
+
+    Parameters:
+    - df (pd.DataFrame): Projection DataFrame.
+    - years (List[int]): Projection years.
+    - st_session_solutions (List[dict]): Configured solutions from session state.
+
+    Returns:
+    - Tuple[dict, dict]: (ef_weights, val_weights)
+    """
+    ef_weights = {idx: {y: {} for y in years} for idx in df.index}
+    val_weights = {idx: {y: {} for y in years} for idx in df.index}
+
+    for sol in st_session_solutions:
+        name = sol["name"]
+        sol_type = sol["type"]
+        sol_target = sol.get("target", "")
+        impact_max = sol.get("impact_max", 0.0)
+        start_year = sol.get("start_year", years[0])
+        interpolated = interpolate_targets(sol.get("years_targets", {}), years, start_year)
+
+        for y in years:
+            level = impact_max * interpolated.get(y, 0.0)
+            if level == 0:
+                continue
+
+            for idx, row in df.iterrows():
+                label = get_label_path(row)
+
+                if sol_type == "simple":
+                    selected = set(sol.get("categories", {}).get("checked", []))
+                    if is_subpath(label, selected):
+                        if sol_target == "EF":
+                            ef_weights[idx][y][name] = level
+                        elif sol_target == "Value":
+                            val_weights[idx][y][name] = level
+
+                elif sol_type == "mixed":
+                    red_sel = set(sol.get("reduction", {}).get("categories", {}).get("checked", []))
+                    if is_subpath(label, red_sel):
+                        if sol_target == "EF":
+                            ef_weights[idx][y][name] = level
+                        elif sol_target == "Value":
+                            val_weights[idx][y][name] = level
+                    inc_sel = set(sol.get("increase", {}).get("categories", {}).get("checked", []))
+                    if is_subpath(label, inc_sel):
+                        if sol_target == "EF":
+                            ef_weights[idx][y][name] = level
+                        elif sol_target == "Value":
+                            val_weights[idx][y][name] = level
+
+    return ef_weights, val_weights
         
 def keep_only_most_specific(paths):
     """
@@ -81,208 +404,8 @@ def keep_only_most_specific(paths):
 
     return kept
 
-def create_solution():
-    """
-    Display a form to create a new mitigation solution and store it in session state.
-    
-    Users can define a solution by setting its name, type (simple or mixed), target field,
-    and maximum possible impact. For mixed solutions, additional placeholders are initialized
-    for reduction and increase configurations.
-    
-    Effects:
-    - Displays a form for entering solution details.
-    - Appends the new solution to st.session_state["solutions"] with:
-        - 'name': Name of the solution.
-        - 'type': "simple" or "mixed".
-        - 'impact_max': Theoretical maximum effect (between 0.0 and 1.0).
-        - 'target': Target field ("EF" or "Value").
-        - 'years_targets': Empty dictionary for future yearly implementation levels.
-        - 'categories': Empty for simple solutions.
-        - 'reduction' and 'increase': Initialized for mixed solutions.
-    - Shows a success message when the solution is successfully added.
-    """
-    
-    st.subheader("Create a new solution")
-
-    with st.form("create_solution_form"):
-        name = st.text_input("Name of the solution")
-        solution_type = st.selectbox("Type of solution", ["simple", "mixed"])
-        impact_max = st.slider("Maximum possible impact (0 = no effect, 1 = full effect)", 0.0, 1.0, 0.5)
-        target = st.selectbox("Target field", ["EF", "Value"])
-
-        submitted = st.form_submit_button("Add solution")
-
-        if submitted and name:
-            new_solution = {
-                "name": name,
-                "type": solution_type,
-                "impact_max": impact_max,
-                "target": target,
-                "years_targets": {},
-                "categories": {}
-            }
-
-            # For mixed solutions, prepare increase and reduction placeholders
-            if solution_type == "mixed":
-                new_solution["reduction"] = {"categories": {}}
-                new_solution["increase"] = {"categories": {}, "conversion_factor": 1.0}
-
-            if "solutions" not in st.session_state:
-                st.session_state.solutions = []
-
-            st.session_state.solutions.append(new_solution)
-            st.success(f"✅ Solution '{name}' of type '{solution_type}' added.")
 
 
-def select_solution(data, years):
-    """
-    Configure an existing mitigation solution (simple or mixed) via an interactive form.
-    
-    This function allows the user to:
-    - Adjust the maximum impact of the solution.
-    - Define the start year and implementation levels per year.
-    - Assign target categories via tree selection.
-    - (For mixed solutions) Define both reduced and increased categories,
-      along with a conversion factor.
-    
-    Parameters:
-    - data (pd.DataFrame): Dataset used to build the hierarchical tree of categories.
-    - years (List[int]): List of available projection years.
-    
-    Effects:
-    - Updates the selected solution in st.session_state["solutions"] with:
-        - 'impact_max': Maximum possible reduction ratio.
-        - 'start_year': Year the solution begins implementation.
-        - 'years_targets': Mapping of year to % of effect applied.
-        - 'categories': For simple solutions, the affected categories.
-        - 'reduction' and 'increase': For mixed solutions, the respective trees and conversion factor.
-    - Displays a success message upon saving the configuration.
-    """
-    st.subheader("Select an existing solution to configure")
-
-    if "solutions" not in st.session_state or not st.session_state.solutions:
-        st.info("No solutions available.")
-        return
-
-    selected_name = st.selectbox(
-        "Choose a solution",
-        [s["name"] for s in st.session_state.solutions]
-    )
-
-    selected_solution = next(
-        (s for s in st.session_state.solutions if s["name"] == selected_name),
-        None
-    )
-
-    if selected_solution:
-        with st.form(f"form_configure_{selected_name}"):
-            st.markdown(f"**Solution**: `{selected_solution['name']}`")
-            st.markdown(f"- Type: `{selected_solution['type']}`")
-            st.markdown(f"- Target field: `{selected_solution['target']}`")
-            st.markdown(f"- Max impact: `{selected_solution['impact_max'] * 100:.1f}%`")
-
-            # Update impact max if needed
-            new_impact = st.slider(
-                "Maximum impact (theoretical limit)",
-                0.0, 1.0,
-                selected_solution.get("impact_max", 1.0),
-                step=0.05,
-                key=f"impact_slider_{selected_name}"
-            )
-            selected_solution["impact_max"] = new_impact
-
-            # Select start year
-            start_year = st.selectbox(
-                "Start year of deployment",
-                years,
-                index=years.index(selected_solution.get("start_year", years[0])) if selected_solution.get("start_year") in years else 0
-                )
-
-            selected_solution["start_year"] = start_year
-
-            available_years = [y for y in years if y >= start_year]
-            
-            
-            # Set implementation levels
-            st.markdown("### Define implementation level per year")
-            
-            selected_years = st.multiselect(
-                "Select target years",
-                available_years,
-                default=sorted(int(y) for y in selected_solution.get("years_targets", {}).keys() if int(y) in available_years)
-            )
-            
-            # Unique prefix to differentiate keys across solutions
-            solution_key_prefix = f"impl_{selected_name}"
-            
-            year_targets = {}
-            
-            for y in selected_years:
-                key = f"{solution_key_prefix}_{y}"
-                default_pct = int(selected_solution.get("years_targets", {}).get(str(y), 0) * 100)
-            
-                # Ensure session_state is initialized
-                if key not in st.session_state:
-                    st.session_state[key] = default_pct
-            
-                pct = st.slider(
-                    f"Implementation for {y} (% of max effect)",
-                    0, 100,
-                    key=key
-                )
-            
-                year_targets[y] = pct / 100
-
-
-            # Assign categories depending on type
-            tree = build_tree(data)
-
-            if selected_solution["type"] == "simple":
-                st.markdown("### Categories impacted by this solution")
-                selection = tree_select(
-                        tree,
-                        checked=selected_solution.get("categories", {}).get("checked", []),
-                        key=f"tree_simple_{selected_name}"
-                        )
-                selected_solution["categories"] = selection
-
-            elif selected_solution["type"] == "mixed":
-                st.markdown("### 📉 Categories to reduce")
-                reduction = tree_select(
-                    tree,
-                    checked=selected_solution.get("reduction", {}).get("categories", {}).get("checked", []),
-                    key=f"tree_red_{selected_name}"
-                    )
-                
-                
-                
-                st.markdown("### 📈 Categories to increase")
-                increase = tree_select(
-                    tree,
-                    checked=selected_solution.get("increase", {}).get("categories", {}).get("checked", []),
-                    key=f"tree_inc_{selected_name}"
-                    )
-                
-
-
-
-                factor = st.number_input(
-                    "Conversion factor (increase units per reduced unit)",
-                    min_value=0.01, format="%.2f",
-                    value=selected_solution.get("increase", {}).get("conversion_factor", 1.0)
-                )
-
-                selected_solution["reduction"] = {"categories": reduction}
-                selected_solution["increase"] = {
-                    "categories": increase,
-                    "conversion_factor": factor
-                }
-
-            submitted = st.form_submit_button("Save configuration")
-
-            if submitted:
-                selected_solution["years_targets"] = year_targets
-                st.success(f"Configuration for '{selected_solution['name']}' saved.")
 
 
 
@@ -340,111 +463,7 @@ def interpolate_targets(year_targets, all_years, start_year):
 
 
 
-def apply_solutions(df, years):
-    """
-    Apply all configured mitigation solutions (simple and mixed) to the projection DataFrame.
 
-    This function updates the projection DataFrame in two phases:
-    - For simple solutions: it applies a proportional reduction to either EF or Value,
-      based on user-defined target levels and selected categories.
-    - For mixed solutions: it first applies reductions to one group of categories,
-      then redistributes the saved emissions proportionally to another group, using a conversion factor.
-
-    Parameters:
-    - df (pd.DataFrame): Projection DataFrame containing 'Value_YEAR' and/or 'EF_YEAR' columns.
-    - years (List[int]): List of years over which the solutions are applied.
-
-    Returns:
-    - pd.DataFrame: A new DataFrame with updated values after applying all solutions.
-    """
-    
-    if "solutions" not in st.session_state or not st.session_state.solutions:
-        return df
-
-    modified_df = df.copy()
-
-    for sol in st.session_state.solutions:
-        #st.markdown(f"#### 🛠️ Applying solution: {sol['name']}")
-        #st.json(sol)
-
-        impact_max = sol.get("impact_max", 0)
-        target_field = sol.get("target", "EF")
-
-        if sol["type"] == "simple":
-            raw_targets = sol.get("years_targets", {})
-            start_year = sol.get("start_year", years[0])
-            interpolated_targets = interpolate_targets(raw_targets, years, start_year)
-            selected = set(sol.get("categories", {}).get("checked", []))
-
-            for idx, row in modified_df.iterrows():
-                full_label = get_label_path(row)
-
-                if is_subpath(full_label, selected):
-                    for year in years:
-                        col = f"{target_field}_{year}"
-                        if col in modified_df.columns:
-                            reduction = impact_max * interpolated_targets.get(year, 0.0)
-                            before = modified_df.at[idx, col]
-                            after = before * (1 - reduction)
-                            modified_df.at[idx, col] = after
-
-                            #st.write(f"✅ {full_label} | {col}: {before:.2f} → {after:.2f} (-{reduction*100:.1f}%)")
-                else:
-                    continue
-                    #st.write(f"🔍 Not matched: {full_label}")
-
-        elif sol["type"] == "mixed":
-            # st.markdown("### 🔍 Mixed solution detected")
-
-            reduction_paths = set(sol.get("reduction", {}).get("categories", {}).get("checked", []))
-            increase_paths = set(sol.get("increase", {}).get("categories", {}).get("checked", []))
-            factor = sol.get("increase", {}).get("conversion_factor", 1.0)
-
-            raw_targets = sol.get("years_targets", {})
-            start_year = sol.get("start_year", years[0])
-            interpolated_targets = interpolate_targets(raw_targets, years, start_year)
-
-            # st.json({"reduction_categories": list(reduction_paths),"increase_categories": list(increase_paths),"factor": factor,"interpolated_targets": interpolated_targets})
-
-            yearly_reductions = {y: 0.0 for y in years}
-
-            # Phase 1: Apply reductions
-            for idx, row in modified_df.iterrows():
-                full_label = get_label_path(row)
-
-                if is_subpath(full_label, reduction_paths):
-                    for year in years:
-                        col = f"{target_field}_{year}"
-                        if col in modified_df.columns:
-                            reduction = impact_max * interpolated_targets.get(year, 0.0)
-                            before = modified_df.at[idx, col]
-                            delta = before * reduction
-                            modified_df.at[idx, col] = before - delta
-                            yearly_reductions[year] += delta
-
-                            # st.write(f"🧊 REDUCE {full_label} | {col}: {before:.2f} → {before - delta:.2f} (-{reduction*100:.1f}%)")
-
-            # Phase 2: Distribute increases
-            affected_rows = []
-            for idx, row in modified_df.iterrows():
-                full_label = get_label_path(row)
-                if is_subpath(full_label, increase_paths):
-                    affected_rows.append(idx)
-
-            # st.write(f"👥 Rows to increase: {len(affected_rows)}")
-
-            if affected_rows:
-                for year in years:
-                    col = f"{target_field}_{year}"
-                    total_increase = yearly_reductions[year] * factor
-                    if len(affected_rows) > 0:
-                        per_row_increase = total_increase / len(affected_rows)
-                        for idx in affected_rows:
-                            before = modified_df.at[idx, col]
-                            modified_df.at[idx, col] += per_row_increase
-                            # st.write(f"🚀 INCREASE idx {idx} | {col}: {before:.2f} → {modified_df.at[idx, col]:.2f} (+{per_row_increase:.2f})")
-
-    return modified_df
 
 
 
@@ -530,67 +549,7 @@ def compute_avoided_emissions(df_before, df_after, years):
         avoided_df[col] = df_before[col] - df_after[col]
     return avoided_df
 
-def build_solution_weights_table(df, years, st_session_solutions):
-    """
-    Build internal weight tables showing how each solution contributes to each row and year.
 
-    For each row and year, this function determines which solutions affect the row
-    (based on category matching) and stores the weight of their effect
-    as: impact_max × implementation level (from interpolation).
-
-    Parameters:
-    - df (pd.DataFrame): Projection DataFrame with one row per item.
-    - years (List[int]): List of projection years.
-    - st_session_solutions (List[dict]): List of configured solutions from session state.
-
-    Returns:
-    - Tuple[dict, dict]: Two nested dictionaries:
-        - ef_weights[row_idx][year] = {solution_name: weight}
-        - val_weights[row_idx][year] = {solution_name: weight}
-    """
-    ef_weights = {idx: {y: {} for y in years} for idx in df.index}
-    val_weights = {idx: {y: {} for y in years} for idx in df.index}
-
-    for sol in st_session_solutions:
-        name = sol["name"]
-        sol_type = sol["type"]
-        sol_target = sol.get("target", "")
-        start_year = sol.get("start_year", years[0])
-        impact_max = sol.get("impact_max", 0.0)
-        interpolated = interpolate_targets(sol.get("years_targets", {}), years, start_year)
-
-        for y in years:
-            level = impact_max * interpolated.get(y, 0.0)
-            if level == 0:
-                continue
-
-            for idx, row in df.iterrows():
-                label = get_label_path(row)
-
-                if sol_type == "simple":
-                    selected = set(sol.get("categories", {}).get("checked", []))
-                    if is_subpath(label, selected):
-                        if sol_target == "EF":
-                            ef_weights[idx][y][name] = level
-                        elif sol_target == "Value":
-                            val_weights[idx][y][name] = level
-
-                elif sol_type == "mixed":
-                    red_sel = set(sol.get("reduction", {}).get("categories", {}).get("checked", []))
-                    if is_subpath(label, red_sel):
-                        if sol_target == "EF":
-                            ef_weights[idx][y][name] = level
-                        elif sol_target == "Value":
-                            val_weights[idx][y][name] = level
-                    inc_sel = set(sol.get("increase", {}).get("categories", {}).get("checked", []))
-                    if is_subpath(label, inc_sel):
-                        if sol_target == "EF":
-                            ef_weights[idx][y][name] = level
-                        elif sol_target == "Value":
-                            val_weights[idx][y][name] = level
-
-
-    return ef_weights, val_weights
 
 def build_diagnostic_weights_table(df, years, ef_weights, val_weights):
     """

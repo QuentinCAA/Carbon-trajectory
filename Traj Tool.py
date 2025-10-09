@@ -33,6 +33,8 @@ Created on Wed Jul 23 13:47:39 2025
 
 #- [ ] Clarify databefore and dataafter to calculate the reduction with growth and structural effects differents roles (voir avec Paolo)
 
+#- [] Create a link between inflation and localisation ? 
+
 
 ## Done
 #- [X] Enable input of growth forecasts (with multiple possible growth scenarios); determine how to assign growth to categories/subcategories
@@ -44,6 +46,8 @@ Created on Wed Jul 23 13:47:39 2025
 #- [X] Display projected values by name and year
 #- [X] Allow export of a file to avoid starting from scratch
 #- [X] Review code and comment properly
+
+#- [X]Integrate inflation
 
 
 ## Futur improvement
@@ -62,7 +66,7 @@ from io import BytesIO
 
 from modules.colors import choose_colors, show_pie_chart_by_category
 from modules.tree import create_projection_base
-from modules.growth import create_growth, assign_growth , apply_projections_to_base, check_projection_coverage
+from modules.growth import create_growth, assign_growth , apply_projections_to_base, check_projection_coverage, define_inflation, summarize_growths
 from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage
 from modules.solutions import init_solutions, select_solution, apply_solutions, create_solution, compute_avoided_emissions, compute_emissions_per_year
 from modules.solutions import build_diagnostic_weights_table, build_solution_weights_table, compute_solution_impact_from_diagnostic
@@ -116,28 +120,78 @@ with tabs[0]:
                 st.error(f"Error while reading the file: {e}")        
     
     with col2:
-        # ============
+        # ============  
         # Load saved session (JSON)
-        # ============
+        # ============  
         st.markdown("### Load a previously saved session")
-        st.markdown("#### If you have allready used the app and saved a file")
+        st.markdown("#### If you have already used the app and saved a file")
     
-        saved_session = st.file_uploader("Upload your saved session (.json)", type=["json"], key="json_loader")
+        saved_session = st.file_uploader(
+            "Upload your saved session (.json)",
+            type=["json"],
+            key="json_loader"
+        )
+    
         if saved_session:
-            try:
-                session_data = json.load(saved_session)
+            import json, pandas as pd, copy, hashlib
     
-                for key, value in session_data.items():
-                    st.session_state[key] = value
+            # Compute a stable fingerprint of the uploaded file contents
+            file_bytes = saved_session.getvalue()
+            digest = hashlib.md5(file_bytes).hexdigest()
     
-                # Rebuild DataFrame from stored dict
-                if "data_dict" in st.session_state:
-                    st.session_state["data"] = pd.DataFrame.from_dict(st.session_state.pop("data_dict"))
+            # Only load if this exact file hasn’t been loaded yet
+            if st.session_state.get("_loaded_json_digest") != digest:
+                try:
+                    # --- 1) Parse JSON from bytes (avoid re-reading the file object)
+                    session_data = json.loads(file_bytes.decode("utf-8"))
     
-                st.success("Session restored! You can now go to the other tabs.")
+                    # --- 2) Restore base keys
+                    for key, value in session_data.items():
+                        st.session_state[key] = value
     
-            except Exception as e:
-                st.error(f"Could not load session: {e}")
+                    # --- 3) Rebuild DataFrame if it was saved as dict
+                    if "data_dict" in st.session_state:
+                        st.session_state["data"] = pd.DataFrame.from_dict(
+                            st.session_state.pop("data_dict")
+                        )
+    
+                    # --- 4) Deep-copy nested objects so Streamlit tracks mutations
+                    for key in ["solutions", "growth_inputs", "structural_effects"]:
+                        if key in st.session_state and isinstance(st.session_state[key], (list, dict)):
+                            st.session_state[key] = copy.deepcopy(st.session_state[key])
+    
+                    # --- 5) Reactivate mutable lists (critical for adding new items later)
+                    for key in ["solutions", "growth_inputs", "structural_effects"]:
+                        if key in st.session_state and isinstance(st.session_state[key], list):
+                            st.session_state[key] = list(st.session_state[key])
+    
+                    # --- 6) Initialize/refresh the central table of yearly targets (if you use it elsewhere)
+                    if "solutions" in st.session_state:
+                        if "solutions_table" not in st.session_state:
+                            st.session_state.solutions_table = {}
+                        # Only add missing entries; do NOT wipe existing table on reruns
+                        for s in st.session_state.solutions:
+                            name = s.get("name")
+                            if name and name not in st.session_state.solutions_table:
+                                st.session_state.solutions_table[name] = s.get("years_targets", {})
+    
+                    # Mark this exact file as loaded so it won’t reload on subsequent reruns
+                    st.session_state["_loaded_json_digest"] = digest
+    
+                    st.success("✅ Session restored successfully! You can now go to the other tabs.")
+    
+                    # Optional: immediately refresh UI after one-time load
+                    st.rerun()
+    
+                except Exception as e:
+                    st.error(f"Could not load session: {e}")
+            else:
+                # Same file already loaded; do nothing (prevents overwriting new changes on reruns)
+                st.info("This session file is already loaded. Edit freely; your changes won’t be overwritten.")
+
+
+
+
 
     
     # Back to full-width layout
@@ -187,21 +241,30 @@ with tabs[1]:
         data = st.session_state["data"]
         years = st.session_state["years"]
 
+        # 🌍 STEP 1 — Define inflation (must come before growth projections)
+        with st.expander("📈 Define inflation assumptions", expanded=False):
+            define_inflation(years)
+
+        # 📊 STEP 2 — Create growth or budget projections
         with st.expander("➕ Create a new growth or budget projection", expanded=True):
             create_growth(years)
 
+        # 🧭 STEP 3 — Assign projections to categories
         st.markdown("## 📌 Assign projections to categories")
         assign_growth(data)
         
-        st.header("Projected Values")
+        summarize_growths(years)
 
+        # 🧮 STEP 4 — Apply projections to data (adjusted for inflation)
+        st.header("Projected Values (real terms)")
         base_projection = create_projection_base(data, years)
         projected = apply_projections_to_base(base_projection, years)
 
+        # 🧩 STEP 5 — Check consistency and display results
         check_projection_coverage(projected)
         st.session_state["projected"] = projected
-
         st.dataframe(projected, use_container_width=True)
+
     else:
         st.info("Please upload a dataset in the Home tab first.")
 
@@ -241,10 +304,28 @@ with tabs[3]:
         data = st.session_state["data"]
         years = st.session_state["years"]
         projected = st.session_state.get("projected")
+        
+        # === Initialize and display the central Targets Table ===
 
+        import pandas as pd
+        import streamlit as st
+        
         init_solutions()
-        select_solution(data, years)
         create_solution()
+        
+        # Initialize the table once per session
+        if "targets_table" not in st.session_state:
+            st.session_state.targets_table = {
+                s["name"]: s.get("years_targets", {}) 
+                for s in st.session_state.get("solutions", [])
+            }
+        
+
+
+
+        
+        select_solution(data, years)
+        
 
         projected_with_solutions = apply_solutions(projected, years)
         st.markdown("### Projected Data with Solutions Applied")
@@ -333,47 +414,95 @@ with tabs[5]:
     st.markdown("## 💾 Save your work")
 
     if has_loaded_data():
-        # To choose the export file's name
-        file_name = st.text_input("Choose a name for your session file (without extension)", value="carbon_session")
+        # -----------------------
+        # Choose export file name
+        # -----------------------
+        file_name = st.text_input(
+            "Choose a name for your session file (without extension)", 
+            value="carbon_session"
+        )
 
-        keys_to_save = ['solutions','growth_inputs','structural_effects','growth_assignments','structural_assignments','category_colors','solution_colors']
+        # -----------------------
+        # Define keys to include
+        # -----------------------
+        keys_to_save = [
+            'solutions',
+            'growth_inputs',
+            'structural_effects',
+            'growth_assignments',
+            'structural_assignments',
+            'category_colors',
+            'solution_colors'
+        ]
 
-        session_to_export = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
+        # -----------------------
+        # Copy session data to export dictionary
+        # -----------------------
+        session_to_export = {
+            k: st.session_state[k] 
+            for k in keys_to_save 
+            if k in st.session_state
+        }
 
+        # -----------------------
+        # 💡 Integrate solutions_table before saving
+        # -----------------------
+        if "solutions" in st.session_state and "solutions_table" in st.session_state:
+            merged_solutions = []
+            for s in st.session_state["solutions"]:
+                s_copy = s.copy()
+                s_copy["years_targets"] = st.session_state["solutions_table"].get(s["name"], {})
+                merged_solutions.append(s_copy)
+            session_to_export["solutions"] = merged_solutions
+
+        # -----------------------
         # Store data and years
+        # -----------------------
         session_to_export["data_dict"] = st.session_state["data"].to_dict()
         session_to_export["years"] = st.session_state["years"]
 
-        json_bytes = json.dumps(session_to_export, indent=2).encode('utf-8')
+        # -----------------------
+        # Export as JSON
+        # -----------------------
+        json_bytes = json.dumps(session_to_export, indent=2).encode("utf-8")
         buffer = BytesIO(json_bytes)
 
-        st.download_button(label="📥 Download session as JSON",data=buffer,file_name=f"{file_name}.json", mime="application/json")
-        
-    
+        st.download_button(
+            label="📥 Download session as JSON",
+            data=buffer,
+            file_name=f"{file_name}.json",
+            mime="application/json"
+        )
 
-        # Button to export Excel
+        # -----------------------
+        # Optional Excel export (for human-readable review)
+        # -----------------------
         if st.button("📈 Export solutions & growths as Excel"):
             with pd.ExcelWriter("carbon_export.xlsx") as writer:
-                # Convert to DataFrames if necessary
+                # Convert each structure to Excel sheet if available
                 if "solutions" in st.session_state:
-                    pd.DataFrame(st.session_state["solutions"]).to_excel(writer, sheet_name="Solutions", index=False)
-        
+                    # Use merged_solutions if it exists, otherwise raw
+                    df_solutions = pd.DataFrame(
+                        merged_solutions if "merged_solutions" in locals() else st.session_state["solutions"]
+                    )
+                    df_solutions.to_excel(writer, sheet_name="Solutions", index=False)
+
                 if "growth_inputs" in st.session_state:
                     pd.DataFrame(st.session_state["growth_inputs"]).to_excel(writer, sheet_name="Growth Inputs", index=False)
-        
+
                 if "structural_effects" in st.session_state:
                     pd.DataFrame(st.session_state["structural_effects"]).to_excel(writer, sheet_name="Structural Effects", index=False)
-        
+
                 if "growth_assignments" in st.session_state:
                     pd.DataFrame(st.session_state["growth_assignments"]).to_excel(writer, sheet_name="Growth Assignments", index=False)
-        
+
                 if "structural_assignments" in st.session_state:
                     pd.DataFrame(st.session_state["structural_assignments"]).to_excel(writer, sheet_name="Structural Assignments", index=False)
-        
-            # Read written Excel file into memory for download
+
+            # Read Excel file into memory
             with open("carbon_export.xlsx", "rb") as f:
                 excel_bytes = f.read()
-        
+
             st.download_button(
                 label="📥 Download Excel",
                 data=excel_bytes,
@@ -383,4 +512,3 @@ with tabs[5]:
 
     else:
         st.info("You need to upload or restore a dataset before saving.")
-       
