@@ -166,20 +166,16 @@ def create_growth(years):
     
     st.subheader("Create a new growth or budget projection")
     
-    # 🛈 Short helper note for users
+    # 🛈 Helper note for users
     st.markdown(
         """
         <div style='color: grey; font-size: 0.9em;'>
         💡 To create a <strong>Budget Projection</strong>, simply select <strong>Budget Projection</strong> 
         and click <strong>Add projection</strong> without filling any intermediate values.<br>
-        This will initialize an empty projection that you can edit later.<br>
-        If you want to add an intermediary year, use the same logic.<br>
-        If you want to go back to growth, you can also use the same logic. 
-        </div>
+        This will initialize an empty projection that you can edit later.<br><br>
         """,
         unsafe_allow_html=True
     )
-
 
     if "growth_inputs" not in st.session_state:
         st.session_state.growth_inputs = []
@@ -196,7 +192,12 @@ def create_growth(years):
         budget = {}
 
         if mode == "Growth %":
-            growth = st.number_input("Growth percentage (%)", min_value=0.0, format="%.2f")
+            growth = st.number_input(
+                "Growth percentage (%) — e.g. -3 for -3%/year, +4 for +4%/year",
+                min_value=-100.0,
+                max_value=100.0,
+                format="%.2f"
+            )
         else:
             budget_start = st.number_input(f"Budget in {start_year} (€)", min_value=0.0, format="%.2f")
             budget_end = st.number_input(f"Budget in {end_year} (€)", min_value=0.0, format="%.2f")
@@ -233,13 +234,11 @@ def create_growth(years):
             st.success(f"✅ Projection '{name}' added.")
 
 
+
 def assign_growth(data):
     """
-    Allow the user to assign categories to existing growth or budget projections.
-    
-    This function displays each existing projection in a form, using a two-column layout
-    for better visual balance. Users can review projection details and assign categories
-    through an interactive tree selector.
+    Allow the user to assign categories to existing growth or budget projections,
+    and delete projections if needed.
     
     Parameters:
     - data (pd.DataFrame): Emissions data used to construct the hierarchical tree structure.
@@ -249,10 +248,22 @@ def assign_growth(data):
         - Projection name and type (Growth % or Budget).
         - Existing growth or budget values.
         - A tree selector for assigning categories.
+        - A delete button to remove the projection.
     - Updates the 'categories' field of each projection based on user selections.
-    - Displays confirmation messages when changes are saved.
     """
     st.subheader("Assign growth or budget projections to categories")
+    
+    # 🛈 Helper note for users
+    st.markdown(
+        """
+        <div style='color: grey; font-size: 0.9em;'>
+        You can <strong>delete a projection</strong> later if it's no longer needed.<br>
+        To do so, first click <strong>🗑️ Delete</strong> — this will remove its assigned effects — 
+        then click <strong>Save configuration</strong> to confirm and remove it permanently.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     if "growth_inputs" not in st.session_state or not st.session_state.growth_inputs:
         st.info("No projections available.")
@@ -260,16 +271,16 @@ def assign_growth(data):
 
     tree = build_tree(data)
     col1, col2 = st.columns(2)
+    to_delete = []
 
     for i, g in enumerate(st.session_state.growth_inputs):
-        # Alternate between columns
         col = col1 if i % 2 == 0 else col2
 
         with col.form(f"assign_growth_{i}"):
             st.markdown(f"### 🛠️ {g['name']} ({g['mode']})")
 
             if g["mode"] == "Growth %":
-                st.write(f"Growth: **{g['growth']}%**")
+                st.write(f"Growth rate: **{g['growth']:+.2f}% per year**")
             else:
                 st.write("Budget projection:")
                 for year, amount in sorted(g["budget"].items(), key=lambda x: int(x[0])):
@@ -279,9 +290,25 @@ def assign_growth(data):
             selection = tree_select(tree, checked=checked, key=f"growth_tree_{i}")
             g["categories"] = selection
 
-            submitted = st.form_submit_button("Save configuration")
+            col_save, col_del = st.columns([3, 1])
+            with col_save:
+                submitted = st.form_submit_button("Save configuration")
+            with col_del:
+                delete_clicked = st.form_submit_button("🗑️ Delete", type="secondary")
+
             if submitted:
-                st.success("✅ Categories updated.")
+                st.success(f"✅ Categories updated for '{g['name']}'.")
+            if delete_clicked:
+                to_delete.append(i)
+
+    # Remove deleted projections after iteration
+    if to_delete:
+        for idx in sorted(to_delete, reverse=True):
+            deleted_name = st.session_state.growth_inputs[idx]["name"]
+            del st.session_state.growth_inputs[idx]
+            st.warning(f"🗑️ Projection '{deleted_name}' deleted.")
+
+
 
 def summarize_growths(years):
     """

@@ -23,38 +23,55 @@ def init_structural_effects():
     
     if "structural_effects" not in st.session_state:
         st.session_state.structural_effects = [
-            {"name": "Electricity from the grid", "value": 0.99, "categories": []},
-            {"name": "Aviation", "value": 0.97, "categories": []},
-            {"name": "International maritime transport", "value": 0.98, "categories": []},
-            {"name": "Procurement of goods", "value": 0.96, "categories": []},
-            {"name": "Procurement of services", "value": 0.97, "categories": []}]
-        
+            {"name": "Electricity from the grid", "value": -1.2, "categories": []},
+            {"name": "Aviation", "value": -2.0, "categories": []},
+            {"name": "International maritime transport", "value": -1.0, "categories": []},
+            {"name": "Procurement of goods", "value": -3.4, "categories": []},
+            {"name": "Procurement of services", "value": -2.3, "categories": []}
+        ]
+
 
 def create_structural_effect():
     """
     Display a form to create a new structural effect and store it in session state.
-    
-    A structural effect represents a multiplicative change in emissions (e.g. reduction by 20%)
-    that can later be assigned to categories. This function lets the user define its name
-    and multiplier, then saves it to the list of structural effects.
-    
+
+    A structural effect represents an annual percentage change in emission factors 
+    (e.g. -2 for -2%/year). Positive values indicate increases, negative values indicate reductions.
+
     Effects:
-    - Displays a form to enter the effect name and multiplier value.
+    - Displays a form to enter the effect name and annual percentage.
     - Appends the new effect to st.session_state["structural_effects"] with an empty category selection.
     - Shows a confirmation message upon successful creation.
     """
-    
+
     st.subheader("Create a new structural effect")
+
+    # 🛈 Helper note
+    st.markdown(
+        """
+        <div style='color: grey; font-size: 0.9em;'>
+        💡 Enter an <strong>annual change percentage</strong> to represent how emission factors evolve over time.<br>
+        For example, <strong>-2</strong> means a <strong>2% annual reduction</strong>, while <strong>+3</strong> means a <strong>3% annual increase</strong>.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     with st.form("form_create_structural_effect"):
         name = st.text_input("Name of the structural effect")
-        value = st.number_input("Multiplier (e.g. 0.8 = 20% reduction)", min_value=0.0, value=1.0, format="%.2f")
+        percentage = st.number_input(
+            "Annual change (%) — e.g. -2 for -2%/year, +3 for +3%/year",
+            min_value=-100.0,
+            max_value=100.0,
+            value=0.0,
+            format="%.2f"
+        )
         submitted = st.form_submit_button("Add effect")
 
         if submitted and name:
             new_effect = {
                 "name": name,
-                "value": value,
+                "value": percentage,  # stored as % (not multiplier)
                 "categories": {"checked": [], "expanded": []}
             }
 
@@ -62,10 +79,36 @@ def create_structural_effect():
                 st.session_state.structural_effects = []
 
             st.session_state.structural_effects.append(new_effect)
-            st.success(f"✅ Structural effect '{name}' added.")
+            st.success(f"✅ Structural effect '{name}' added ({percentage:+.2f}%/year).")
+
+
+
 
 def assign_structural_effects(data):
+    """
+    Display and manage structural effects, allowing category assignment, edition, and deletion.
+
+    Parameters:
+    - data (pd.DataFrame): DataFrame used to construct the category hierarchy.
+
+    Effects:
+    - Displays all existing structural effects.
+    - Allows users to adjust annual % changes, assign categories, and delete effects.
+    - Updates st.session_state["structural_effects"] accordingly.
+    """
     st.subheader("Assign structural effects to categories")
+
+    # 🛈 Helper paragraph for guidance
+    st.markdown(
+        """
+        <div style='color: grey; font-size: 0.9em;'>
+        💡 You can <strong>delete a structural effect</strong> if it's no longer relevant.<br>
+        To do so, first click <strong>🗑️ Delete</strong> — this will remove its assigned categories.<br>
+        Then click <strong>Save configuration</strong> to confirm and permanently remove it from the list.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     if "structural_effects" not in st.session_state or not st.session_state.structural_effects:
         st.info("No structural effects defined yet.")
@@ -73,9 +116,11 @@ def assign_structural_effects(data):
 
     tree = build_tree(data)
     cols = st.columns(3)
+    to_delete = []  # Track effects to delete after rendering
+
+    import re
 
     for i, effect in enumerate(st.session_state.structural_effects):
-        import re
         form_id = re.sub(r"\W+", "_", effect["name"])
         col = cols[i % 3]
 
@@ -83,11 +128,12 @@ def assign_structural_effects(data):
             st.markdown(f"### ⚙️ `{effect['name']}`")
 
             new_value = st.number_input(
-                "Multiplier (e.g. 0.8 = 20% reduction)",
-                min_value=0.0,
-                value=effect.get("value", 1.0),
+                "Annual change (%) — e.g. -2 for -2%/year, +3 for +3%/year",
+                min_value=-100.0,
+                max_value=100.0,
+                value=effect.get("value", 0.0),
                 format="%.2f",
-                key=f"multiplier_{effect['name']}"
+                key=f"percent_{effect['name']}"
             )
 
             selection = tree_select(
@@ -97,13 +143,30 @@ def assign_structural_effects(data):
                 key=f"tree_struct_{effect['name']}"
             )
 
-            # 💡 Mise à jour AVANT le bouton
+            # Update state before save
             st.session_state.structural_effects[i]["value"] = new_value
             st.session_state.structural_effects[i]["categories"] = selection
 
-            submitted = st.form_submit_button("Save configuration")
+            # Two-column layout for buttons
+            col_save, col_del = st.columns([3, 1])
+            with col_save:
+                submitted = st.form_submit_button("Save configuration")
+            with col_del:
+                delete_clicked = st.form_submit_button("🗑️ Delete", type="secondary")
+
             if submitted:
                 st.success(f"✅ Configuration for '{effect['name']}' saved.")
+            if delete_clicked:
+                to_delete.append(i)
+
+    # Delete after loop (avoid concurrent modification)
+    if to_delete:
+        for idx in sorted(to_delete, reverse=True):
+            deleted_name = st.session_state.structural_effects[idx]["name"]
+            del st.session_state.structural_effects[idx]
+            st.warning(f"🗑️ Structural effect '{deleted_name}' deleted.")
+
+
 
 
 
@@ -111,10 +174,14 @@ def assign_structural_effects(data):
 def apply_structural_effects(data):
     """
     Apply structural effects to Emission Factor (EF) columns in the projection DataFrame.
-    
+
+    Each effect now represents an **annual percentage change** rather than a multiplier.
+    For example, -2 means a 2% annual decrease in emission factors.
+
     For each row, the function identifies applicable structural effects based on category
     assignment. The effects are applied cumulatively to EF columns year by year 
-    (starting from the second year), using the previous year's value multiplied by the effect(s).
+    (starting from the second year), using the previous year's value multiplied by 
+    (1 + percentage/100) for each applicable effect.
     
     Parameters:
     - data (pd.DataFrame): Projection DataFrame containing EF_YEAR columns and a 'Full path' column.
@@ -122,7 +189,7 @@ def apply_structural_effects(data):
     Returns:
     - pd.DataFrame: Updated DataFrame with structural effects applied to EF_YEAR columns.
     """
-    
+
     if "structural_effects" not in st.session_state:
         return data
 
@@ -132,14 +199,14 @@ def apply_structural_effects(data):
     for idx, row in df.iterrows():
         full_path = row["Full path"]
 
+        # Identify all effects applicable to this row
         applicable_effects = []
         for effect in st.session_state.structural_effects:
             categories = effect.get("categories", {})
 
-            # If it's a dict: extract from "checked"
+            # Extract checked categories
             if isinstance(categories, dict):
                 checked = categories.get("checked", [])
-            # If it's already a list: keep it as is
             elif isinstance(categories, list):
                 checked = categories
             else:
@@ -151,20 +218,24 @@ def apply_structural_effects(data):
         if not applicable_effects:
             continue
 
+        # Apply cumulative effects year by year
         for i, col in enumerate(ef_cols):
             if i == 0:
-                continue  # EF_2025 remains unchanged
+                continue  # EF_2025 remains unchanged (baseline year)
 
             prev_col = ef_cols[i - 1]
             new_val = df.at[idx, prev_col]
 
             for effect in applicable_effects:
-                multiplier = effect.get("value", 1.0)
+                # Convert stored % to multiplier
+                percent_change = effect.get("value", 0.0)
+                multiplier = 1 + (percent_change / 100)
                 new_val *= multiplier
 
             df.at[idx, col] = new_val
 
     return df
+
 
 
 def check_structural_coverage(data):
