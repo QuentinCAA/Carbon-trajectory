@@ -117,7 +117,8 @@ def create_solution():
 def select_solution(data, years):
     """
     Configure, rename, reorder, or delete existing mitigation solutions.
-    Supports multiple increase targets for mixed solutions.
+    Fixed version for Streamlit Cloud: forms have a submit button to avoid warnings,
+    and Move/Delete buttons are handled outside of forms for stability.
     """
     import re
 
@@ -128,12 +129,13 @@ def select_solution(data, years):
         <div style='color: grey; font-size: 0.9em;'>
         💡 You can rename, reorder, or delete solutions directly here.<br>
         - Use <strong>Decarbonation potential</strong> to set the maximum theoretical reduction (in %).<br>
-        - For <strong>mixed solutions</strong>, you can now define several increase groups, each with its own factor and categories.<br>
+        - For <strong>mixed solutions</strong>, you can now define several increase groups.<br>
         </div>
         """,
         unsafe_allow_html=True
     )
 
+    # --- Safety check
     if "solutions" not in st.session_state or not st.session_state.solutions:
         st.info("No solutions available yet. Please create one first.")
         return
@@ -149,15 +151,14 @@ def select_solution(data, years):
         with col.form(f"form_edit_solution_{form_id}"):
             st.markdown(f"### 💡 Solution {i+1}")
 
-            # --- Name
+            # --- Editable fields
             new_name = st.text_input("Solution name", value=sol["name"], key=f"name_{i}")
             st.session_state.solutions[i]["name"] = new_name
 
             st.markdown(f"- Type: `{sol['type']}` | Target: `{sol['target']}`")
 
-            # --- Decarbonation potential
             decarb_potential = st.number_input(
-                "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
+                "Decarbonation potential (%)",
                 min_value=0.0,
                 max_value=100.0,
                 value=float(sol.get("decarbonation_potential", 0.0) * 100),
@@ -166,7 +167,6 @@ def select_solution(data, years):
             )
             st.session_state.solutions[i]["decarbonation_potential"] = decarb_potential / 100.0
 
-            # --- Start year
             start_year = st.selectbox(
                 "Start year",
                 years,
@@ -175,10 +175,8 @@ def select_solution(data, years):
             )
             st.session_state.solutions[i]["start_year"] = start_year
 
-            # --- Implementation targets
+            # --- Year targets
             available_years = [y for y in years if y >= start_year]
-            st.markdown("### Implementation level per year")
-
             year_targets = sol.get("years_targets", {})
             local_targets = {}
 
@@ -202,7 +200,7 @@ def select_solution(data, years):
 
             st.session_state.solutions[i]["years_targets"] = local_targets
 
-            # --- Category selection
+            # --- Category tree
             if sol["type"] == "simple":
                 st.markdown("### Categories impacted by this solution")
                 selection = tree_select(
@@ -224,30 +222,24 @@ def select_solution(data, years):
                 st.session_state.solutions[i]["reduction"] = {"categories": reduction}
 
                 st.markdown("### 📈 Categories to increase")
-
-                # Initialize increases list if needed
                 if not isinstance(sol.get("increase"), list):
                     st.session_state.solutions[i]["increase"] = []
 
-                # Display each increase group
                 updated_increase_groups = []
                 for j, inc in enumerate(sol.get("increase", [])):
                     st.markdown(f"#### ➕ Increase group {j+1}")
-
                     label = st.text_input(
-                        "Label (e.g. Boat, Truck, Train)",
+                        "Label",
                         value=inc.get("label", f"Increase {j+1}"),
                         key=f"inc_label_{i}_{j}"
                     )
-
                     factor = st.number_input(
-                        "Conversion factor (e.g. 1.5 = 1.5 km of replacement per km reduced)",
+                        "Conversion factor",
                         min_value=0.01,
                         format="%.2f",
                         value=float(inc.get("conversion_factor", 1.0)),
                         key=f"factor_{i}_{j}"
                     )
-
                     inc_selection = tree_select(
                         tree,
                         checked=inc.get("categories", {}).get("checked", []),
@@ -255,61 +247,46 @@ def select_solution(data, years):
                         key=f"tree_inc_{i}_{j}"
                     )
 
-                    remove = st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{i}_{j}")
-
-                    if not remove:
+                    if not st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{i}_{j}"):
                         updated_increase_groups.append({
                             "label": label,
                             "categories": inc_selection,
                             "conversion_factor": factor
                         })
 
-                # Button to add a new increase group
-                if st.form_submit_button("➕ Add new increase group"):
-                    updated_increase_groups.append({
-                        "label": f"Increase {len(updated_increase_groups)+1}",
-                        "categories": {"checked": [], "expanded": []},
-                        "conversion_factor": 1.0
-                    })
-
                 st.session_state.solutions[i]["increase"] = updated_increase_groups
 
-            # --- Buttons
-            col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 2])
-            with col1:
-                submitted = st.form_submit_button("💾 Save configuration")
-            with col2:
-                move_up = st.form_submit_button("⬆️ Move up")
-            with col3:
-                move_down = st.form_submit_button("⬇️ Move down")
-            with col4:
-                delete_clicked = st.form_submit_button("🗑️ Delete", type="secondary")
-
-            if move_up and i > 0:
-                st.session_state.solutions[i - 1], st.session_state.solutions[i] = (
-                    st.session_state.solutions[i],
-                    st.session_state.solutions[i - 1],
-                )
-                st.rerun()
-
-            if move_down and i < len(st.session_state.solutions) - 1:
-                st.session_state.solutions[i + 1], st.session_state.solutions[i] = (
-                    st.session_state.solutions[i],
-                    st.session_state.solutions[i + 1],
-                )
-                st.rerun()
-
+            # ✅ Submit button just to validate the form (avoid “Missing Submit Button”)
+            submitted = st.form_submit_button("💾 Save configuration")
             if submitted:
                 st.success(f"✅ Configuration for '{new_name}' saved.")
 
-            if delete_clicked:
-                to_delete.append(i)
+        # === Action buttons OUTSIDE the form ===
+        bcol1, bcol2, bcol3 = col.columns([1, 1, 1])
+        if bcol1.button("⬆️ Move up", key=f"move_up_{i}") and i > 0:
+            st.session_state.solutions[i - 1], st.session_state.solutions[i] = (
+                st.session_state.solutions[i],
+                st.session_state.solutions[i - 1],
+            )
+            st.rerun()
 
+        if bcol2.button("⬇️ Move down", key=f"move_down_{i}") and i < len(st.session_state.solutions) - 1:
+            st.session_state.solutions[i + 1], st.session_state.solutions[i] = (
+                st.session_state.solutions[i],
+                st.session_state.solutions[i + 1],
+            )
+            st.rerun()
+
+        if bcol3.button("🗑️ Delete", key=f"delete_{i}"):
+            to_delete.append(i)
+
+    # --- Handle deletions after loop
     if to_delete:
         for idx in sorted(to_delete, reverse=True):
             deleted_name = st.session_state.solutions[idx]["name"]
             del st.session_state.solutions[idx]
             st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
+
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA
