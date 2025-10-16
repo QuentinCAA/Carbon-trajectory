@@ -117,9 +117,8 @@ def create_solution():
 def select_solution(data, years):
     """
     Configure, rename, reorder, or delete existing mitigation solutions.
-    Reliable both locally and on Streamlit Cloud.
+    Supports multiple increase targets for mixed solutions.
     """
-
     import re
 
     st.subheader("⚙️ Configure existing solutions")
@@ -129,7 +128,7 @@ def select_solution(data, years):
         <div style='color: grey; font-size: 0.9em;'>
         💡 You can rename, reorder, or delete solutions directly here.<br>
         - Use <strong>Decarbonation potential</strong> to set the maximum theoretical reduction (in %).<br>
-        - You can define multiple increase groups for mixed solutions, each with its own factor and categories.<br>
+        - For <strong>mixed solutions</strong>, you can now define several increase groups, each with its own factor and categories.<br>
         </div>
         """,
         unsafe_allow_html=True
@@ -141,11 +140,7 @@ def select_solution(data, years):
 
     tree = build_tree(data)
     cols = st.columns(3)
-
-    # These variables will hold any pending actions
-    move_up_idx = None
-    move_down_idx = None
-    delete_idx = None
+    to_delete = []
 
     for i, sol in enumerate(st.session_state.solutions):
         form_id = re.sub(r"\W+", "_", sol["name"])
@@ -229,9 +224,12 @@ def select_solution(data, years):
                 st.session_state.solutions[i]["reduction"] = {"categories": reduction}
 
                 st.markdown("### 📈 Categories to increase")
+
+                # Initialize increases list if needed
                 if not isinstance(sol.get("increase"), list):
                     st.session_state.solutions[i]["increase"] = []
 
+                # Display each increase group
                 updated_increase_groups = []
                 for j, inc in enumerate(sol.get("increase", [])):
                     st.markdown(f"#### ➕ Increase group {j+1}")
@@ -243,7 +241,7 @@ def select_solution(data, years):
                     )
 
                     factor = st.number_input(
-                        "Conversion factor",
+                        "Conversion factor (e.g. 1.5 = 1.5 km of replacement per km reduced)",
                         min_value=0.01,
                         format="%.2f",
                         value=float(inc.get("conversion_factor", 1.0)),
@@ -266,6 +264,7 @@ def select_solution(data, years):
                             "conversion_factor": factor
                         })
 
+                # Button to add a new increase group
                 if st.form_submit_button("➕ Add new increase group"):
                     updated_increase_groups.append({
                         "label": f"Increase {len(updated_increase_groups)+1}",
@@ -278,7 +277,7 @@ def select_solution(data, years):
             # --- Buttons
             col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 2])
             with col1:
-                save_clicked = st.form_submit_button("💾 Save configuration")
+                submitted = st.form_submit_button("💾 Save configuration")
             with col2:
                 move_up = st.form_submit_button("⬆️ Move up")
             with col3:
@@ -286,43 +285,37 @@ def select_solution(data, years):
             with col4:
                 delete_clicked = st.form_submit_button("🗑️ Delete", type="secondary")
 
-            if save_clicked:
+            if move_up and i > 0:
+                st.session_state.solutions[i - 1], st.session_state.solutions[i] = (
+                    st.session_state.solutions[i],
+                    st.session_state.solutions[i - 1],
+                )
+                st.rerun()
+
+            if move_down and i < len(st.session_state.solutions) - 1:
+                st.session_state.solutions[i + 1], st.session_state.solutions[i] = (
+                    st.session_state.solutions[i],
+                    st.session_state.solutions[i + 1],
+                )
+                st.rerun()
+
+            if submitted:
                 st.success(f"✅ Configuration for '{new_name}' saved.")
-            if move_up:
-                move_up_idx = i
-            if move_down:
-                move_down_idx = i
+
             if delete_clicked:
-                delete_idx = i
+                to_delete.append(i)
 
-    # === Post-form operations (safe outside UI transaction) ===
-    if move_up_idx is not None and move_up_idx > 0:
-        st.session_state.solutions[move_up_idx - 1], st.session_state.solutions[move_up_idx] = (
-            st.session_state.solutions[move_up_idx],
-            st.session_state.solutions[move_up_idx - 1],
-        )
-        st.success("✅ Solution moved up.")
-        st.rerun()
-
-    if move_down_idx is not None and move_down_idx < len(st.session_state.solutions) - 1:
-        st.session_state.solutions[move_down_idx + 1], st.session_state.solutions[move_down_idx] = (
-            st.session_state.solutions[move_down_idx],
-            st.session_state.solutions[move_down_idx + 1],
-        )
-        st.success("✅ Solution moved down.")
-        st.rerun()
-
-    if delete_idx is not None:
-        deleted_name = st.session_state.solutions[delete_idx]["name"]
-        del st.session_state.solutions[delete_idx]
-        st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
-        st.rerun()
-
-
+    if to_delete:
+        for idx in sorted(to_delete, reverse=True):
+            deleted_name = st.session_state.solutions[idx]["name"]
+            del st.session_state.solutions[idx]
+            st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA
 # =========================================================
+
+
 def apply_solutions(df, years):
     """
     Apply all configured mitigation solutions (simple and mixed) to the projection DataFrame.
