@@ -131,20 +131,13 @@ def select_solution(data, years):
     """
     Configure, rename, reorder, or delete existing mitigation solutions.
 
-    Key design decisions (to be robust on Streamlit Cloud and after JSON restore):
-    - Every solution has a stable 'id' (UUID). Widget keys are derived from that id, not from list indices.
-    - Action buttons (Move up / Move down / Delete) DO NOT use `on_click`. We read their boolean return and
-      mutate state immediately, then call `st.rerun()` (outside callbacks), which works reliably.
-    - Each form (simple or mixed) ALWAYS contains at least one `st.form_submit_button`, so changes can be saved.
-    - Mixed solutions keep the "Add new increase group" submit button inside the form; when clicked, we append
-      the group, save just that part, and rerun.
-
-    Parameters
+    Features:
     ----------
-    data : pd.DataFrame
-        Original dataset used to build the hierarchical tree.
-    years : List[int]
-        Available years for targets and implementation level.
+    - Each solution includes an editable 'description' field.
+    - By default, only key info (number, name, type, target, optional description) is shown.
+    - Full details are hidden in an expandable section.
+    - Solutions can be reordered or deleted.
+    - Stable UUIDs ensure no widget key conflicts.
     """
     import uuid
     import re
@@ -156,9 +149,8 @@ def select_solution(data, years):
     st.markdown(
         """
         <div style='color: grey; font-size: 0.9em;'>
-        💡 You can rename, reorder, or delete solutions directly here.<br>
-        - Use <strong>Decarbonation potential</strong> to set the maximum theoretical reduction (in %).<br>
-        - For <strong>mixed solutions</strong>, you can define several increase groups, each with its own factor and categories.<br>
+        💡 You can rename, describe, reorder, or delete solutions here.<br>
+        Click <strong>Expand details</strong> to view and edit the full configuration.
         </div>
         """,
         unsafe_allow_html=True
@@ -169,10 +161,12 @@ def select_solution(data, years):
         st.info("No solutions available yet. Please create one first.")
         return
 
-    # --- Backward compatibility: ensure stable id and normalize 'increase'
+    # --- Ensure stable id, description and structure for all solutions
     for sol in st.session_state.solutions:
         if "id" not in sol or not sol["id"]:
             sol["id"] = str(uuid.uuid4())
+        if "description" not in sol:
+            sol["description"] = ""
         if sol.get("type") == "mixed":
             inc = sol.get("increase", [])
             if isinstance(inc, dict):
@@ -180,10 +174,10 @@ def select_solution(data, years):
             elif inc is None:
                 sol["increase"] = []
 
-    # Build hierarchical tree once
+    # Build category tree once
     tree = build_tree(data)
 
-    # Helper: find the index of a solution by id
+    # Helper to find index by id
     def _idx_of(solutions, sid):
         for ii, ss in enumerate(solutions):
             if ss["id"] == sid:
@@ -196,11 +190,25 @@ def select_solution(data, years):
     for i, sol in enumerate(st.session_state.solutions):
         sid = sol["id"]
         col = cols[i % 3]
+        local = deepcopy(sol)
 
         with col.container(border=True):
-            st.markdown(f"### 💡 Solution {i+1}")
+            # ───────────────────────────────────────────────
+            # Header: basic info (always visible)
+            # ───────────────────────────────────────────────
+            st.markdown(f"### 💡 {i + 1}. {local['name']}")
+            st.markdown(f"**Type:** {local['type']} | **Target:** {local['target']}")
 
-            # ---------- Action buttons OUTSIDE the form (no on_click) ----------
+            # Optional description preview
+            if local.get("description"):
+                st.markdown(
+                    f"<div style='color: grey; font-size: 0.9em;'>{local['description']}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ───────────────────────────────────────────────
+            # Buttons row (reorder / delete)
+            # ───────────────────────────────────────────────
             b1, b2, b3 = st.columns([1, 1, 1])
             with b1:
                 if st.button("⬆️ Move up", key=f"btn_up_{sid}", use_container_width=True) and i > 0:
@@ -221,164 +229,159 @@ def select_solution(data, years):
                     st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
                     st.rerun()
 
-            # ---------- Edit form (commit only on Save) ----------
-            with st.form(f"form_edit_solution_{sid}"):
-                local = deepcopy(sol)
+            # ───────────────────────────────────────────────
+            # Expandable section for detailed configuration
+            # ───────────────────────────────────────────────
+            with st.expander("🔧 Expand details", expanded=False):
+                with st.form(f"form_edit_solution_{sid}"):
+                    # --- Editable name & description
+                    local["name"] = st.text_input("Solution name", value=local["name"], key=f"name_{sid}")
+                    local["description"] = st.text_area(
+                        "Description (optional)",
+                        value=local.get("description", ""),
+                        key=f"desc_{sid}",
+                        height=80,
+                        help="Briefly describe the purpose or scope of this solution."
+                    )
 
-                # --- Name
-                local["name"] = st.text_input("Solution name", value=local["name"], key=f"name_{sid}")
-                st.markdown(f"- Type: `{local['type']}` | Target: `{local['target']}`")
+                    st.markdown(f"- **Type:** `{local['type']}` | **Target:** `{local['target']}`")
 
-                # --- Decarbonation potential
-                decarb_pct = st.number_input(
-                    "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
-                    min_value=0.0, max_value=100.0,
-                    value=float(local.get("decarbonation_potential", 0.0) * 100),
-                    format="%.2f",
-                    key=f"potential_{sid}"
-                )
-                local["decarbonation_potential"] = decarb_pct / 100.0
-
-                # --- Start year
-                start_year = local.get("start_year", years[0])
-                start_year = start_year if start_year in years else years[0]
-                local["start_year"] = st.selectbox(
-                    "Start year",
-                    years,
-                    index=years.index(start_year),
-                    key=f"start_{sid}"
-                )
-
-                # --- Implementation targets
-                st.markdown("### Implementation level per year")
-                available_years = [y for y in years if y >= local["start_year"]]
-                year_targets = (local.get("years_targets", {}) or {})
-                # Normalize keys to string
-                year_targets = {str(k): float(v) for k, v in year_targets.items()}
-                selected_years = st.multiselect(
-                    "Select target years",
-                    available_years,
-                    default=sorted(int(y) for y in year_targets.keys()),
-                    key=f"years_{sid}"
-                )
-
-                local_targets = {}
-                for y in selected_years:
-                    pct = st.number_input(
-                        f"{y} (% of max effect)",
+                    # --- Decarbonation potential
+                    decarb_pct = st.number_input(
+                        "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
                         min_value=0.0, max_value=100.0,
-                        value=float(year_targets.get(str(y), 0.0) * 100),
+                        value=float(local.get("decarbonation_potential", 0.0) * 100),
                         format="%.2f",
-                        key=f"{sid}_impl_{y}"
+                        key=f"potential_{sid}"
                     )
-                    local_targets[str(y)] = pct / 100.0
-                local["years_targets"] = local_targets
+                    local["decarbonation_potential"] = decarb_pct / 100.0
 
-                # --- Category selection
-                if local["type"] == "simple":
-                    st.markdown("### Categories impacted by this solution")
-                    selection = tree_select(
-                        tree,
-                        checked=local.get("categories", {}).get("checked", []),
-                        expanded=local.get("categories", {}).get("expanded", []),
-                        key=f"tree_simple_{sid}"
+                    # --- Start year
+                    start_year = local.get("start_year", years[0])
+                    start_year = start_year if start_year in years else years[0]
+                    local["start_year"] = st.selectbox(
+                        "Start year",
+                        years,
+                        index=years.index(start_year),
+                        key=f"start_{sid}"
                     )
-                    local["categories"] = selection
 
-                    # ⬇️ IMPORTANT: a submit button MUST exist in the form
-                    save_clicked = st.form_submit_button("💾 Save configuration")
-                    if save_clicked:
-                        idx = _idx_of(st.session_state.solutions, sid)
-                        if idx is not None:
-                            st.session_state.solutions[idx] = local
-                            st.success(f"✅ Configuration for '{local['name']}' saved.")
-                            st.rerun()
+                    # --- Implementation targets
+                    st.markdown("### Implementation level per year")
+                    available_years = [y for y in years if y >= local["start_year"]]
+                    year_targets = (local.get("years_targets", {}) or {})
+                    year_targets = {str(k): float(v) for k, v in year_targets.items()}
 
-                elif local["type"] == "mixed":
-                    st.markdown("### 📉 Categories to reduce")
-                    reduction = tree_select(
-                        tree,
-                        checked=local.get("reduction", {}).get("categories", {}).get("checked", []),
-                        expanded=local.get("reduction", {}).get("categories", {}).get("expanded", []),
-                        key=f"tree_red_{sid}"
+                    selected_years = st.multiselect(
+                        "Select target years",
+                        available_years,
+                        default=sorted(int(y) for y in year_targets.keys()),
+                        key=f"years_{sid}"
                     )
-                    local["reduction"] = {"categories": reduction}
 
-                    st.markdown("### 📈 Categories to increase")
-                    increase_groups = local.get("increase", [])
-                    if isinstance(increase_groups, dict):
-                        increase_groups = [increase_groups]
-                    if increase_groups is None:
-                        increase_groups = []
-
-                    updated_increase_groups = []
-                    for j, inc in enumerate(increase_groups):
-                        st.markdown(f"#### ➕ Increase group {j+1}")
-                        label = st.text_input(
-                            "Label (e.g. Boat, Truck, Train)",
-                            value=inc.get("label", f"Increase {j+1}"),
-                            key=f"inc_label_{sid}_{j}"
+                    local_targets = {}
+                    for y in selected_years:
+                        pct = st.number_input(
+                            f"{y} (% of max effect)",
+                            min_value=0.0, max_value=100.0,
+                            value=float(year_targets.get(str(y), 0.0) * 100),
+                            format="%.2f",
+                            key=f"{sid}_impl_{y}"
                         )
-                        factor = st.number_input(
-                            "Conversion factor (e.g. 1.5 = 1.5 km of replacement per km reduced)",
-                            min_value=0.01, format="%.2f",
-                            value=float(inc.get("conversion_factor", 1.0)),
-                            key=f"factor_{sid}_{j}"
-                        )
-                        inc_selection = tree_select(
+                        local_targets[str(y)] = pct / 100.0
+                    local["years_targets"] = local_targets
+
+                    # --- Category selection
+                    if local["type"] == "simple":
+                        st.markdown("### Categories impacted by this solution")
+                        selection = tree_select(
                             tree,
-                            checked=inc.get("categories", {}).get("checked", []),
-                            expanded=inc.get("categories", {}).get("expanded", []),
-                            key=f"tree_inc_{sid}_{j}"
+                            checked=local.get("categories", {}).get("checked", []),
+                            expanded=local.get("categories", {}).get("expanded", []),
+                            key=f"tree_simple_{sid}"
                         )
-                        remove = st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{sid}_{j}")
+                        local["categories"] = selection
 
-                        if not remove:
-                            updated_increase_groups.append({
-                                "label": label,
-                                "categories": inc_selection,
-                                "conversion_factor": factor
-                            })
+                        save_clicked = st.form_submit_button("💾 Save configuration")
+                        if save_clicked:
+                            idx = _idx_of(st.session_state.solutions, sid)
+                            if idx is not None:
+                                st.session_state.solutions[idx] = local
+                                st.success(f"✅ Configuration for '{local['name']}' saved.")
+                                st.rerun()
 
-                    # Two submit buttons (no key argument allowed for form_submit_button)
-                    add_clicked = st.form_submit_button("➕ Add new increase group")
-                    save_clicked = st.form_submit_button("💾 Save configuration")
+                    elif local["type"] == "mixed":
+                        st.markdown("### 📉 Categories to reduce")
+                        reduction = tree_select(
+                            tree,
+                            checked=local.get("reduction", {}).get("categories", {}).get("checked", []),
+                            expanded=local.get("reduction", {}).get("categories", {}).get("expanded", []),
+                            key=f"tree_red_{sid}"
+                        )
+                        local["reduction"] = {"categories": reduction}
 
-                    if add_clicked:
-                        # Append a blank group directly and rerun
-                        idx = _idx_of(st.session_state.solutions, sid)
-                        if idx is not None:
-                            current = st.session_state.solutions[idx]
-                            cur_inc = current.get("increase", [])
-                            if isinstance(cur_inc, dict):
-                                cur_inc = [cur_inc]
-                            cur_inc = cur_inc or []
-                            cur_inc.append({
-                                "label": f"Increase {len(cur_inc)+1}",
-                                "categories": {"checked": [], "expanded": []},
-                                "conversion_factor": 1.0
-                            })
-                            current["increase"] = cur_inc
-                            st.session_state.solutions[idx] = current
-                            st.rerun()
+                        st.markdown("### 📈 Categories to increase")
+                        increase_groups = local.get("increase", [])
+                        if isinstance(increase_groups, dict):
+                            increase_groups = [increase_groups]
+                        if increase_groups is None:
+                            increase_groups = []
 
-                    if save_clicked:
-                        local["increase"] = updated_increase_groups
-                        idx = _idx_of(st.session_state.solutions, sid)
-                        if idx is not None:
-                            st.session_state.solutions[idx] = local
-                            st.success(f"✅ Configuration for '{local['name']}' saved.")
-                            st.rerun()
+                        updated_increase_groups = []
+                        for j, inc in enumerate(increase_groups):
+                            st.markdown(f"#### ➕ Increase group {j+1}")
+                            label = st.text_input(
+                                "Label (e.g. Boat, Truck, Train)",
+                                value=inc.get("label", f"Increase {j+1}"),
+                                key=f"inc_label_{sid}_{j}"
+                            )
+                            factor = st.number_input(
+                                "Conversion factor (e.g. 1.5 = 1.5 km replacement per km reduced)",
+                                min_value=0.01, format="%.2f",
+                                value=float(inc.get("conversion_factor", 1.0)),
+                                key=f"factor_{sid}_{j}"
+                            )
+                            inc_selection = tree_select(
+                                tree,
+                                checked=inc.get("categories", {}).get("checked", []),
+                                expanded=inc.get("categories", {}).get("expanded", []),
+                                key=f"tree_inc_{sid}_{j}"
+                            )
+                            remove = st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{sid}_{j}")
+                            if not remove:
+                                updated_increase_groups.append({
+                                    "label": label,
+                                    "categories": inc_selection,
+                                    "conversion_factor": factor
+                                })
 
-                else:
-                    # Fallback (future types)
-                    save_clicked = st.form_submit_button("💾 Save configuration")
-                    if save_clicked:
-                        idx = _idx_of(st.session_state.solutions, sid)
-                        if idx is not None:
-                            st.session_state.solutions[idx] = local
-                            st.success(f"✅ Configuration for '{local['name']}' saved.")
-                            st.rerun()
+                        add_clicked = st.form_submit_button("➕ Add new increase group")
+                        save_clicked = st.form_submit_button("💾 Save configuration")
+
+                        if add_clicked:
+                            idx = _idx_of(st.session_state.solutions, sid)
+                            if idx is not None:
+                                current = st.session_state.solutions[idx]
+                                cur_inc = current.get("increase", [])
+                                if isinstance(cur_inc, dict):
+                                    cur_inc = [cur_inc]
+                                cur_inc.append({
+                                    "label": f"Increase {len(cur_inc)+1}",
+                                    "categories": {"checked": [], "expanded": []},
+                                    "conversion_factor": 1.0
+                                })
+                                current["increase"] = cur_inc
+                                st.session_state.solutions[idx] = current
+                                st.rerun()
+
+                        if save_clicked:
+                            local["increase"] = updated_increase_groups
+                            idx = _idx_of(st.session_state.solutions, sid)
+                            if idx is not None:
+                                st.session_state.solutions[idx] = local
+                                st.success(f"✅ Configuration for '{local['name']}' saved.")
+                                st.rerun()
+
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA

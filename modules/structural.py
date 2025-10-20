@@ -287,3 +287,39 @@ def check_structural_coverage(data):
         st.success("✅ Each Full path is covered by at most one structural effect.")
 
 
+import pandas as pd
+
+def compute_structural_impact(df_before_structural, years):
+    """
+    Compute annual avoided emissions caused by structural effects.
+    Compares 'projected' before and after applying structural effects.
+
+    Parameters
+    ----------
+    df_before_structural : pd.DataFrame
+        Projection DataFrame before applying structural effects.
+    years : list of int
+        List of target years.
+
+    Returns
+    -------
+    pd.Series
+        Avoided emissions (tCO₂e) per year due to structural effects.
+    """
+    import pandas as pd
+
+    # Check if we already have structural version stored
+    df_after_structural = st.session_state.get("projected_with_structural")
+    if df_after_structural is None:
+        st.warning("Structural effects not applied yet.")
+        return pd.Series({year: 0 for year in years})
+
+    avoided = {}
+    for year in years:
+        val_col = f"Value_{year}"
+        ef_col = f"EF_{year}"
+        em_before = (df_before_structural[val_col] * df_before_structural[ef_col]).sum()
+        em_after = (df_after_structural[val_col] * df_after_structural[ef_col]).sum()
+        avoided[year] = em_before - em_after
+
+    return pd.Series(avoided)

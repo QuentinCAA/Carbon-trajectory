@@ -64,19 +64,20 @@ import pandas as pd
 import json
 from io import BytesIO
 
-from modules.colors import choose_colors, show_pie_chart_by_category
+from modules.colors import choose_colors, show_pie_chart_by_category, show_total_emissions
 from modules.tree import create_projection_base
 from modules.growth import create_growth, assign_growth , apply_projections_to_base, check_projection_coverage, define_inflation, summarize_growths
-from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage
+from modules.structural import init_structural_effects, create_structural_effect , assign_structural_effects, apply_structural_effects, check_structural_coverage, compute_structural_impact
 from modules.solutions import init_solutions, select_solution, apply_solutions, create_solution, compute_avoided_emissions, compute_emissions_per_year
 from modules.solutions import build_diagnostic_weights_table, build_solution_weights_table, compute_solution_impact_from_diagnostic
-from modules.visualisation import choose_solution_colors ,plot_cumulative_emissions_reduction, plot_annual_emissions_reduction,prepare_waterfall_inputs ,plot_waterfall_emissions
+from modules.visualisation import choose_solution_colors_and_order ,plot_cumulative_emissions_reduction, plot_annual_emissions_reduction, prepare_waterfall_inputs
+from modules.visualisation import plot_waterfall_emissions, export_svg, compute_solution_percentages
 
 # Activate wide layout mode to reduce side margins (must be the first Streamlit command)
 st.set_page_config(layout="wide")
 
 # Main tabs
-tabs = st.tabs(["Home", "Growth", "Structural Effects", "Solutions", "Visualisations","Export"])
+tabs = st.tabs(["Home", "Growth", "Structural Effects", "Solutions", "Results","Visualisations","Export"])
 
 # Helper: check if session is ready
 def has_loaded_data():
@@ -227,6 +228,7 @@ with tabs[0]:
             # Let user define the colors
             choose_colors(data["Category"].unique())
             show_pie_chart_by_category(data)
+            show_total_emissions(data)
             #build_tree(data) + also need to import this fonction from the module tree
 
 
@@ -263,6 +265,9 @@ with tabs[1]:
         # 🧩 STEP 5 — Check consistency and display results
         check_projection_coverage(projected)
         st.session_state["projected"] = projected
+        # Save growth-only version (without structural effects)
+        st.session_state["projected_growth_only"] = projected.copy()
+
         st.dataframe(projected, use_container_width=True)
 
     else:
@@ -285,11 +290,20 @@ with tabs[2]:
         assign_structural_effects(data)
 
 
-        projected = apply_structural_effects(projected)
-        st.session_state["projected"] = projected
+        projected_with_structural = apply_structural_effects(projected)
+        st.session_state["projected_with_structural"] = projected_with_structural
+        
+        # Compute structural effect impact once and store it
+        structural_impact = compute_structural_impact(
+            st.session_state["projected_growth_only"],
+            st.session_state["years"]
+        )
+        st.session_state["structural_effects_impact"] = structural_impact
+        
+        check_structural_coverage(projected_with_structural)
+        st.dataframe(projected_with_structural, use_container_width=True)
 
-        check_structural_coverage(projected)
-        st.dataframe(projected, use_container_width=True)
+        
     else:
         st.info("Please upload a dataset in the Home tab first.")
 
@@ -325,9 +339,22 @@ with tabs[3]:
 
         
         select_solution(data, years)
+        projected_with_solutions = apply_solutions(projected, years)
+
         
 
-        projected_with_solutions = apply_solutions(projected, years)
+    else:
+        st.info("Please upload your footprint file in the Home tab.")
+
+# =========================================
+# Tab 5: Results
+# =========================================
+
+with tabs[4]:
+    st.title("📊 Results")
+    
+    if has_loaded_data():
+        
         st.markdown("### Projected Data with Solutions Applied")
         st.dataframe(projected_with_solutions, use_container_width=True)
 
@@ -363,54 +390,148 @@ with tabs[3]:
         impact_df = compute_solution_impact_from_diagnostic(projected,projected_with_solutions,df_avoided,diagnostic_df,years)
         st.markdown("### 🧮 Final attribution of emissions reduction by solution")
         st.dataframe(impact_df.style.format("{:.2f}"), use_container_width=True)
-
+    
+        
     else:
         st.info("Please upload your footprint file in the Home tab.")
 
 # =========================================
-# Tab 5: Visualisations
-# =========================================
-
-with tabs[4]:
-    st.title("Visualisations")
-    
-    if has_loaded_data() and not impact_df.empty:
-        
-        col1,col2 = st.columns(2)
-        
-        with col1:
-            solutions = list(impact_df.index)
-            choose_solution_colors(solutions)
-    
-            # You can now pass this to your plotting function
-            solution_colors = st.session_state.solution_colors
-          
-            fig_cumulate = plot_cumulative_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
-            
-            st.pyplot(fig_cumulate)
-        
-        with col2:
-    
-            fig_annual = plot_annual_emissions_reduction(df_emissions_before,impact_df,solution_colors,True)
-            
-            st.pyplot(fig_annual)
-            
-            start_value, steps, labels, colors = prepare_waterfall_inputs(df_emissions_before,impact_df,solution_colors)
-            
-            fig_waterfall = plot_waterfall_emissions(start_value,steps,labels,colors)
-            
-            st.pyplot(fig_waterfall)
-
-
-
-
-
-
-# =========================================
-# Tab 6: Export
+# Tab 6: Visualisations
 # =========================================
 
 with tabs[5]:
+    st.title("📊 Visualisations")
+
+    if has_loaded_data() and not impact_df.empty:
+    
+        # =========================================================
+        # --- CONFIGURATION ---
+        # =========================================================
+        st.markdown("### ⚙️ Visualisation settings")
+    
+        include_structural = st.toggle(
+            "Include structural effects in 'No action' scenario",
+            value=True,
+            help="If disabled, structural effects appear as a first solution."
+        )
+    
+        years = st.session_state["years"]
+    
+        # =========================================================
+        # --- HANDLE STRUCTURAL EFFECTS TOGGLE ---
+        # =========================================================
+        if include_structural:
+            # ✅ Structural effects already included in EF baseline
+            df_emissions_base = df_emissions_before.copy()
+
+        else:
+            # ❌ Structural effects shown as a separate solution
+            struct_impact = st.session_state.get("structural_effects_impact")
+
+            if struct_impact is not None:
+                # Prepare a clean DataFrame with unique index
+                struct_impact_df = pd.DataFrame([struct_impact])
+                struct_impact_df.index = ["Structural effects"]
+
+                # Remove any existing duplicate entry
+                impact_df = impact_df.drop(index="Structural effects", errors="ignore")
+                impact_df = impact_df.loc[~impact_df.index.duplicated(keep="first")]
+
+                # Concatenate safely
+                impact_df = pd.concat([struct_impact_df, impact_df])
+
+                # Initialize color configuration if not already present
+                if "solution_colors" not in st.session_state:
+                    st.session_state.solution_colors = {}
+
+                # Assign a neutral gray color if not already set
+                if "Structural effects" not in st.session_state.solution_colors:
+                    st.session_state.solution_colors["Structural effects"] = "#888888"
+
+                st.info("Structural effects are displayed as a separate solution.")
+            else:
+                st.warning("Structural effects impact not found — please apply them in the Structural tab first.")
+
+            df_emissions_base = df_emissions_before.copy()
+
+        # =========================================================
+        # --- COLORS + ORDER ---
+        # =========================================================
+        # Guarantee uniqueness before plotting
+        impact_df = impact_df.loc[~impact_df.index.duplicated(keep="first")]
+
+        solutions = list(impact_df.index)
+        choose_solution_colors_and_order(solutions)
+        solution_colors = st.session_state.solution_colors
+        solution_order = st.session_state.solution_order
+    
+        # =========================================================
+        # --- COMPUTE SHARES AND PLOTS ---
+        # =========================================================
+        impact_df = compute_solution_percentages(impact_df, df_emissions_base)
+        impact_df = impact_df.loc[solution_order]
+        total_reduction = impact_df["Total"].sum()
+    
+        st.markdown(f"**🌍 Total avoided emissions: {total_reduction:,.0f} tCO₂e**")
+    
+        # =========================================================
+        # --- PLOTS ---
+        # =========================================================
+        col1, col2 = st.columns(2)
+    
+        # === Left column : cumulative ===
+        with col1:
+            st.markdown("#### 📈 Cumulative reductions")
+            fig_cumulate = plot_cumulative_emissions_reduction(
+                df_emissions_base, impact_df, solution_colors, True
+            )
+            st.pyplot(fig_cumulate)
+            st.download_button(
+                "⬇️ Download SVG",
+                export_svg(fig_cumulate, "cumulative.svg"),
+                file_name="cumulative.svg",
+                mime="image/svg+xml",
+            )
+    
+        # === Right column : annual + waterfall ===
+        with col2:
+            st.markdown("#### 📆 Annual avoided emissions")
+            fig_annual = plot_annual_emissions_reduction(
+                df_emissions_base, impact_df, solution_colors, True
+            )
+            st.pyplot(fig_annual)
+            st.download_button(
+                "⬇️ Download SVG",
+                export_svg(fig_annual, "annual.svg"),
+                file_name="annual.svg",
+                mime="image/svg+xml",
+            )
+    
+            st.markdown("#### 💧 Waterfall of emission reductions")
+            start_value, steps, labels, colors = prepare_waterfall_inputs(
+                df_emissions_base, impact_df, solution_colors
+            )
+            fig_waterfall = plot_waterfall_emissions(start_value, steps, labels, colors)
+            st.pyplot(fig_waterfall)
+            st.download_button(
+                "⬇️ Download SVG",
+                export_svg(fig_waterfall, "waterfall.svg"),
+                file_name="waterfall.svg",
+                mime="image/svg+xml",
+            )
+
+    else:
+        st.info("Please upload a dataset first.")
+
+
+
+
+
+# =========================================
+# Tab 7: Export
+# =========================================
+
+with tabs[6]:
     st.markdown("## 💾 Save your work")
 
     if has_loaded_data():

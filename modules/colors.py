@@ -46,15 +46,21 @@ def choose_colors(categories, key_prefix: str = "colors", allow_reset: bool = Tr
         Whether to show Move up/down buttons to change order.
     """
 
+    import numpy as np
+    import plotly.express as px
+    import matplotlib.colors as mcolors
+
     st.subheader("🎨 Choose colors and order of categories")
 
-    # Initialize color and order state
+    # =========================================================
+    # --- INITIALIZATION ---
+    # =========================================================
     if "category_colors" not in st.session_state:
         st.session_state.category_colors = {}
     if "category_order" not in st.session_state:
         st.session_state.category_order = list(categories)
 
-    # Keep order in sync with new categories (add missing, remove obsolete)
+    # Keep order synchronized with available categories
     order = st.session_state.category_order
     for cat in categories:
         if cat not in order:
@@ -62,12 +68,33 @@ def choose_colors(categories, key_prefix: str = "colors", allow_reset: bool = Tr
     order = [cat for cat in order if cat in categories]
     st.session_state.category_order = order
 
-    # Palette defaults
+    # Default palette (Plotly qualitative)
     palette = px.colors.qualitative.Safe + px.colors.qualitative.Plotly + px.colors.qualitative.D3
+
+    # Helper: generate random hex if needed
     def _random_hex():
         return "#" + "".join(np.random.choice(list("0123456789ABCDEF"), 6))
 
-    # Reset colors
+    # Helper: safely convert any color (rgb(...) → #RRGGBB)
+    def normalize_color(color_str: str) -> str:
+        if isinstance(color_str, str):
+            color_str = color_str.strip()
+            if color_str.startswith("rgb"):
+                try:
+                    nums = [int(x) for x in color_str.strip("rgb() ").split(",")]
+                    color_str = mcolors.to_hex([n / 255 for n in nums])
+                except Exception:
+                    color_str = "#888888"
+            elif not color_str.startswith("#"):
+                # In case of unexpected input, fallback
+                color_str = "#888888"
+        else:
+            color_str = "#888888"
+        return color_str
+
+    # =========================================================
+    # --- RESET BUTTONS ---
+    # =========================================================
     if allow_reset and st.button("↺ Reset all colors", key=f"{key_prefix}_reset_colors"):
         new_map = {}
         for idx, cat in enumerate(order):
@@ -75,23 +102,28 @@ def choose_colors(categories, key_prefix: str = "colors", allow_reset: bool = Tr
         st.session_state.category_colors = new_map
         st.success("Colors reset to default palette.")
 
-    # Reset order
     if allow_reorder and st.button("↻ Reset order (alphabetical)", key=f"{key_prefix}_reset_order"):
         st.session_state.category_order = sorted(categories)
         st.rerun()
 
-    # Display each category row
+    # =========================================================
+    # --- DISPLAY EACH CATEGORY ---
+    # =========================================================
     for i, cat in enumerate(st.session_state.category_order):
-        # Ensure color exists
+        # Ensure a valid color exists
         if cat not in st.session_state.category_colors:
             st.session_state.category_colors[cat] = palette[i % len(palette)]
+
+        # Normalize color format (avoid rgb(...) crash)
+        current_color = normalize_color(st.session_state.category_colors[cat])
+        st.session_state.category_colors[cat] = current_color
 
         cols = st.columns([3, 0.6, 0.6])
         with cols[0]:
             color = st.color_picker(
                 f"{cat}",
-                value=st.session_state.category_colors[cat],
-                key=f"{key_prefix}_picker_{_slug_key(cat)}"
+                value=current_color,
+                key=f"{key_prefix}_picker_{cat.replace(' ', '_')}"
             )
             st.session_state.category_colors[cat] = color
 
@@ -107,9 +139,12 @@ def choose_colors(categories, key_prefix: str = "colors", allow_reset: bool = Tr
                     st.session_state.category_order = order
                     st.rerun()
 
+    # =========================================================
+    # --- FOOTER INFO ---
+    # =========================================================
     st.markdown(
         "<p style='color:grey;font-size:0.9em;'>"
-        "💡 The chosen order will define how categories are displayed in charts."
+        "💡 The chosen order defines how categories are displayed in charts."
         "</p>",
         unsafe_allow_html=True
     )
@@ -158,3 +193,51 @@ def show_pie_chart_by_category(
 
     st.plotly_chart(fig, use_container_width=True)
 
+
+def show_total_emissions(dataframe, title="🌍 Total CO₂ emissions", unit="tCO₂e"):
+    """
+    Display the total CO₂ emissions from a dataframe.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        Must contain an 'Emissions' column with numeric values.
+    title : str, optional
+        The title displayed above the total value.
+    unit : str, optional
+        The unit to display next to the total (default = 'tCO₂e').
+
+    Effects
+    -------
+    Displays a styled card showing the total emissions sum in Streamlit.
+    """
+    if "Emissions" not in dataframe.columns:
+        st.warning("The dataframe must contain an 'Emissions' column.")
+        return
+
+    # Convert to numeric safely
+    df = dataframe.copy()
+    df["Emissions"] = pd.to_numeric(df["Emissions"], errors="coerce").fillna(0.0)
+    total_emissions = df["Emissions"].sum()
+
+    # Formatting for readability
+    formatted_total = f"{total_emissions:,.0f}".replace(",", " ")  # thin spaces for thousands
+
+    # Display in a styled block
+    st.markdown(
+        f"""
+        <div style="
+            background-color:#f6f6f6;
+            border:1px solid #ddd;
+            border-radius:12px;
+            padding:1rem;
+            margin-top:0.5rem;
+            text-align:center;">
+            <h3 style="margin-bottom:0.3rem;">{title}</h3>
+            <p style="font-size:1.8rem; font-weight:bold; margin:0;">
+                {formatted_total} {unit}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
