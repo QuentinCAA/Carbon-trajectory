@@ -12,19 +12,23 @@ import pandas as pd
 
 
 # =========================================================
-# 1️⃣ INITIALIZATION
+# 1️⃣ INITIALIZATION (with stable UUIDs)
 # =========================================================
 def init_solutions():
     """
-    Initialise the default list of mitigation solutions in session state if not already present.
+    Initialize the default list of mitigation solutions in session state if not already present.
+    Each solution now has a stable 'id' (UUID) to ensure widget keys remain stable across
+    reordering and JSON save/restore cycles.
 
-    Each solution defines an action that reduces emissions either by lowering the emission factor (EF)
-    or by reducing the activity value. These default entries are of type 'simple', and can later
-    be configured with year-specific impacts and category assignments.
+    Backward compatibility:
+    - If solutions exist but some lack 'id', we assign one on the fly without altering other fields.
     """
+    import uuid
+
     if "solutions" not in st.session_state:
         st.session_state.solutions = [
             {
+                "id": str(uuid.uuid4()),
                 "name": "Green procurement policy",
                 "type": "simple",
                 "decarbonation_potential": 0.2,
@@ -33,6 +37,7 @@ def init_solutions():
                 "categories": {}
             },
             {
+                "id": str(uuid.uuid4()),
                 "name": "Reduced purchasing volumes",
                 "type": "simple",
                 "decarbonation_potential": 0.25,
@@ -41,6 +46,7 @@ def init_solutions():
                 "categories": {}
             },
             {
+                "id": str(uuid.uuid4()),
                 "name": "Bike purchase incentive",
                 "type": "simple",
                 "decarbonation_potential": 0.3,
@@ -49,18 +55,24 @@ def init_solutions():
                 "categories": {}
             }
         ]
-
-
+    else:
+        # Backward compatibility: ensure every solution has a stable id.
+        for sol in st.session_state.solutions:
+            if "id" not in sol or not sol["id"]:
+                sol["id"] = str(uuid.uuid4())
+                
 # =========================================================
-# 2️⃣ CREATION
+# 2️⃣ CREATION (assign a stable UUID at creation time)
 # =========================================================
 def create_solution():
     """
     Create a new mitigation solution and store it in session state.
+    Uses a stable 'id' (UUID) so reordering and JSON persistence remain robust.
 
-    - Uses 'Decarbonation potential (%)' instead of 'impact_max'
-    - Numeric inputs (stable across sessions)
+    - Decarbonation potential is stored as a ratio (0–1).
+    - Compatible with simple and mixed solutions (new mixed format with increase groups list).
     """
+    import uuid
 
     st.subheader("➕ Create a new solution")
 
@@ -92,6 +104,7 @@ def create_solution():
 
         if submitted and name:
             new_solution = {
+                "id": str(uuid.uuid4()),  # 🔒 stable identity
                 "name": name,
                 "type": solution_type,
                 "decarbonation_potential": decarb_potential / 100.0,  # store as ratio
@@ -102,7 +115,8 @@ def create_solution():
 
             if solution_type == "mixed":
                 new_solution["reduction"] = {"categories": {}}
-                new_solution["increase"] = {"categories": {}, "conversion_factor": 1.0}
+                # Use list of increase groups for flexibility
+                new_solution["increase"] = []  # each item: {"label", "categories", "conversion_factor"}
 
             if "solutions" not in st.session_state:
                 st.session_state.solutions = []
@@ -110,16 +124,32 @@ def create_solution():
             st.session_state.solutions.append(new_solution)
             st.success(f"✅ Solution '{name}' ({solution_type}) created successfully.")
 
-
 # =========================================================
-# 3️⃣ CONFIGURATION / ASSIGNMENT
+# 3️⃣ CONFIGURATION / ASSIGNMENT (stable keys + clean actions)
 # =========================================================
 def select_solution(data, years):
     """
     Configure, rename, reorder, or delete existing mitigation solutions.
-    Supports multiple increase targets for mixed solutions.
+
+    Key design decisions (to be robust on Streamlit Cloud and after JSON restore):
+    - Every solution has a stable 'id' (UUID). Widget keys are derived from that id, not from list indices.
+    - Action buttons (Move up / Move down / Delete) DO NOT use `on_click`. We read their boolean return and
+      mutate state immediately, then call `st.rerun()` (outside callbacks), which works reliably.
+    - Each form (simple or mixed) ALWAYS contains at least one `st.form_submit_button`, so changes can be saved.
+    - Mixed solutions keep the "Add new increase group" submit button inside the form; when clicked, we append
+      the group, save just that part, and rerun.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Original dataset used to build the hierarchical tree.
+    years : List[int]
+        Available years for targets and implementation level.
     """
+    import uuid
     import re
+    from copy import deepcopy
+    from streamlit_tree_select import tree_select
 
     st.subheader("⚙️ Configure existing solutions")
 
@@ -128,189 +158,227 @@ def select_solution(data, years):
         <div style='color: grey; font-size: 0.9em;'>
         💡 You can rename, reorder, or delete solutions directly here.<br>
         - Use <strong>Decarbonation potential</strong> to set the maximum theoretical reduction (in %).<br>
-        - For <strong>mixed solutions</strong>, you can now define several increase groups, each with its own factor and categories.<br>
+        - For <strong>mixed solutions</strong>, you can define several increase groups, each with its own factor and categories.<br>
         </div>
         """,
         unsafe_allow_html=True
     )
 
+    # Safety check
     if "solutions" not in st.session_state or not st.session_state.solutions:
         st.info("No solutions available yet. Please create one first.")
         return
 
-    tree = build_tree(data)
-    cols = st.columns(3)
-    to_delete = []
+    # --- Backward compatibility: ensure stable id and normalize 'increase'
+    for sol in st.session_state.solutions:
+        if "id" not in sol or not sol["id"]:
+            sol["id"] = str(uuid.uuid4())
+        if sol.get("type") == "mixed":
+            inc = sol.get("increase", [])
+            if isinstance(inc, dict):
+                sol["increase"] = [inc]
+            elif inc is None:
+                sol["increase"] = []
 
+    # Build hierarchical tree once
+    tree = build_tree(data)
+
+    # Helper: find the index of a solution by id
+    def _idx_of(solutions, sid):
+        for ii, ss in enumerate(solutions):
+            if ss["id"] == sid:
+                return ii
+        return None
+
+    cols = st.columns(3)
+
+    # === Render one card per solution ===
     for i, sol in enumerate(st.session_state.solutions):
-        form_id = re.sub(r"\W+", "_", sol["name"])
+        sid = sol["id"]
         col = cols[i % 3]
 
-        with col.form(f"form_edit_solution_{form_id}"):
+        with col.container(border=True):
             st.markdown(f"### 💡 Solution {i+1}")
 
-            # --- Name
-            new_name = st.text_input("Solution name", value=sol["name"], key=f"name_{i}")
-            st.session_state.solutions[i]["name"] = new_name
+            # ---------- Action buttons OUTSIDE the form (no on_click) ----------
+            b1, b2, b3 = st.columns([1, 1, 1])
+            with b1:
+                if st.button("⬆️ Move up", key=f"btn_up_{sid}", use_container_width=True) and i > 0:
+                    sols = st.session_state.solutions
+                    sols[i - 1], sols[i] = sols[i], sols[i - 1]
+                    st.session_state.solutions = sols
+                    st.rerun()
+            with b2:
+                if st.button("⬇️ Move down", key=f"btn_down_{sid}", use_container_width=True) and i < len(st.session_state.solutions) - 1:
+                    sols = st.session_state.solutions
+                    sols[i + 1], sols[i] = sols[i], sols[i + 1]
+                    st.session_state.solutions = sols
+                    st.rerun()
+            with b3:
+                if st.button("🗑️ Delete", key=f"btn_del_{sid}", type="secondary", use_container_width=True):
+                    deleted_name = st.session_state.solutions[i]["name"]
+                    del st.session_state.solutions[i]
+                    st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
+                    st.rerun()
 
-            st.markdown(f"- Type: `{sol['type']}` | Target: `{sol['target']}`")
+            # ---------- Edit form (commit only on Save) ----------
+            with st.form(f"form_edit_solution_{sid}"):
+                local = deepcopy(sol)
 
-            # --- Decarbonation potential
-            decarb_potential = st.number_input(
-                "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
-                min_value=0.0,
-                max_value=100.0,
-                value=float(sol.get("decarbonation_potential", 0.0) * 100),
-                format="%.2f",
-                key=f"potential_{i}"
-            )
-            st.session_state.solutions[i]["decarbonation_potential"] = decarb_potential / 100.0
+                # --- Name
+                local["name"] = st.text_input("Solution name", value=local["name"], key=f"name_{sid}")
+                st.markdown(f"- Type: `{local['type']}` | Target: `{local['target']}`")
 
-            # --- Start year
-            start_year = st.selectbox(
-                "Start year",
-                years,
-                index=years.index(sol.get("start_year", years[0])) if sol.get("start_year") in years else 0,
-                key=f"start_{i}"
-            )
-            st.session_state.solutions[i]["start_year"] = start_year
-
-            # --- Implementation targets
-            available_years = [y for y in years if y >= start_year]
-            st.markdown("### Implementation level per year")
-
-            year_targets = sol.get("years_targets", {})
-            local_targets = {}
-
-            selected_years = st.multiselect(
-                "Select target years",
-                available_years,
-                default=sorted(int(y) for y in year_targets.keys()),
-                key=f"years_{i}"
-            )
-
-            for y in selected_years:
-                pct = st.number_input(
-                    f"{y} (% of max effect)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=float(year_targets.get(str(y), 0.0) * 100),
+                # --- Decarbonation potential
+                decarb_pct = st.number_input(
+                    "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
+                    min_value=0.0, max_value=100.0,
+                    value=float(local.get("decarbonation_potential", 0.0) * 100),
                     format="%.2f",
-                    key=f"{i}_impl_{y}"
+                    key=f"potential_{sid}"
                 )
-                local_targets[str(y)] = pct / 100.0
+                local["decarbonation_potential"] = decarb_pct / 100.0
 
-            st.session_state.solutions[i]["years_targets"] = local_targets
-
-            # --- Category selection
-            if sol["type"] == "simple":
-                st.markdown("### Categories impacted by this solution")
-                selection = tree_select(
-                    tree,
-                    checked=sol.get("categories", {}).get("checked", []),
-                    expanded=sol.get("categories", {}).get("expanded", []),
-                    key=f"tree_simple_{i}"
+                # --- Start year
+                start_year = local.get("start_year", years[0])
+                start_year = start_year if start_year in years else years[0]
+                local["start_year"] = st.selectbox(
+                    "Start year",
+                    years,
+                    index=years.index(start_year),
+                    key=f"start_{sid}"
                 )
-                st.session_state.solutions[i]["categories"] = selection
 
-            elif sol["type"] == "mixed":
-                st.markdown("### 📉 Categories to reduce")
-                reduction = tree_select(
-                    tree,
-                    checked=sol.get("reduction", {}).get("categories", {}).get("checked", []),
-                    expanded=sol.get("reduction", {}).get("categories", {}).get("expanded", []),
-                    key=f"tree_red_{i}"
+                # --- Implementation targets
+                st.markdown("### Implementation level per year")
+                available_years = [y for y in years if y >= local["start_year"]]
+                year_targets = (local.get("years_targets", {}) or {})
+                # Normalize keys to string
+                year_targets = {str(k): float(v) for k, v in year_targets.items()}
+                selected_years = st.multiselect(
+                    "Select target years",
+                    available_years,
+                    default=sorted(int(y) for y in year_targets.keys()),
+                    key=f"years_{sid}"
                 )
-                st.session_state.solutions[i]["reduction"] = {"categories": reduction}
 
-                st.markdown("### 📈 Categories to increase")
-
-                # Initialize increases list if needed
-                if not isinstance(sol.get("increase"), list):
-                    st.session_state.solutions[i]["increase"] = []
-
-                # Display each increase group
-                updated_increase_groups = []
-                for j, inc in enumerate(sol.get("increase", [])):
-                    st.markdown(f"#### ➕ Increase group {j+1}")
-
-                    label = st.text_input(
-                        "Label (e.g. Boat, Truck, Train)",
-                        value=inc.get("label", f"Increase {j+1}"),
-                        key=f"inc_label_{i}_{j}"
-                    )
-
-                    factor = st.number_input(
-                        "Conversion factor (e.g. 1.5 = 1.5 km of replacement per km reduced)",
-                        min_value=0.01,
+                local_targets = {}
+                for y in selected_years:
+                    pct = st.number_input(
+                        f"{y} (% of max effect)",
+                        min_value=0.0, max_value=100.0,
+                        value=float(year_targets.get(str(y), 0.0) * 100),
                         format="%.2f",
-                        value=float(inc.get("conversion_factor", 1.0)),
-                        key=f"factor_{i}_{j}"
+                        key=f"{sid}_impl_{y}"
                     )
+                    local_targets[str(y)] = pct / 100.0
+                local["years_targets"] = local_targets
 
-                    inc_selection = tree_select(
+                # --- Category selection
+                if local["type"] == "simple":
+                    st.markdown("### Categories impacted by this solution")
+                    selection = tree_select(
                         tree,
-                        checked=inc.get("categories", {}).get("checked", []),
-                        expanded=inc.get("categories", {}).get("expanded", []),
-                        key=f"tree_inc_{i}_{j}"
+                        checked=local.get("categories", {}).get("checked", []),
+                        expanded=local.get("categories", {}).get("expanded", []),
+                        key=f"tree_simple_{sid}"
                     )
+                    local["categories"] = selection
 
-                    remove = st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{i}_{j}")
+                    # ⬇️ IMPORTANT: a submit button MUST exist in the form
+                    save_clicked = st.form_submit_button("💾 Save configuration")
+                    if save_clicked:
+                        idx = _idx_of(st.session_state.solutions, sid)
+                        if idx is not None:
+                            st.session_state.solutions[idx] = local
+                            st.success(f"✅ Configuration for '{local['name']}' saved.")
+                            st.rerun()
 
-                    if not remove:
-                        updated_increase_groups.append({
-                            "label": label,
-                            "categories": inc_selection,
-                            "conversion_factor": factor
-                        })
+                elif local["type"] == "mixed":
+                    st.markdown("### 📉 Categories to reduce")
+                    reduction = tree_select(
+                        tree,
+                        checked=local.get("reduction", {}).get("categories", {}).get("checked", []),
+                        expanded=local.get("reduction", {}).get("categories", {}).get("expanded", []),
+                        key=f"tree_red_{sid}"
+                    )
+                    local["reduction"] = {"categories": reduction}
 
-                # Button to add a new increase group
-                if st.form_submit_button("➕ Add new increase group"):
-                    updated_increase_groups.append({
-                        "label": f"Increase {len(updated_increase_groups)+1}",
-                        "categories": {"checked": [], "expanded": []},
-                        "conversion_factor": 1.0
-                    })
+                    st.markdown("### 📈 Categories to increase")
+                    increase_groups = local.get("increase", [])
+                    if isinstance(increase_groups, dict):
+                        increase_groups = [increase_groups]
+                    if increase_groups is None:
+                        increase_groups = []
 
-                st.session_state.solutions[i]["increase"] = updated_increase_groups
+                    updated_increase_groups = []
+                    for j, inc in enumerate(increase_groups):
+                        st.markdown(f"#### ➕ Increase group {j+1}")
+                        label = st.text_input(
+                            "Label (e.g. Boat, Truck, Train)",
+                            value=inc.get("label", f"Increase {j+1}"),
+                            key=f"inc_label_{sid}_{j}"
+                        )
+                        factor = st.number_input(
+                            "Conversion factor (e.g. 1.5 = 1.5 km of replacement per km reduced)",
+                            min_value=0.01, format="%.2f",
+                            value=float(inc.get("conversion_factor", 1.0)),
+                            key=f"factor_{sid}_{j}"
+                        )
+                        inc_selection = tree_select(
+                            tree,
+                            checked=inc.get("categories", {}).get("checked", []),
+                            expanded=inc.get("categories", {}).get("expanded", []),
+                            key=f"tree_inc_{sid}_{j}"
+                        )
+                        remove = st.checkbox(f"❌ Remove this increase group", key=f"remove_inc_{sid}_{j}")
 
-            # --- Buttons
-            col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 2])
-            with col1:
-                submitted = st.form_submit_button("💾 Save configuration")
-            with col2:
-                move_up = st.form_submit_button("⬆️ Move up")
-            with col3:
-                move_down = st.form_submit_button("⬇️ Move down")
-            with col4:
-                delete_clicked = st.form_submit_button("🗑️ Delete", type="secondary")
+                        if not remove:
+                            updated_increase_groups.append({
+                                "label": label,
+                                "categories": inc_selection,
+                                "conversion_factor": factor
+                            })
 
-            if move_up and i > 0:
-                st.session_state.solutions[i - 1], st.session_state.solutions[i] = (
-                    st.session_state.solutions[i],
-                    st.session_state.solutions[i - 1],
-                )
-                st.rerun()
+                    # Two submit buttons (no key argument allowed for form_submit_button)
+                    add_clicked = st.form_submit_button("➕ Add new increase group")
+                    save_clicked = st.form_submit_button("💾 Save configuration")
 
-            if move_down and i < len(st.session_state.solutions) - 1:
-                st.session_state.solutions[i + 1], st.session_state.solutions[i] = (
-                    st.session_state.solutions[i],
-                    st.session_state.solutions[i + 1],
-                )
-                st.rerun()
+                    if add_clicked:
+                        # Append a blank group directly and rerun
+                        idx = _idx_of(st.session_state.solutions, sid)
+                        if idx is not None:
+                            current = st.session_state.solutions[idx]
+                            cur_inc = current.get("increase", [])
+                            if isinstance(cur_inc, dict):
+                                cur_inc = [cur_inc]
+                            cur_inc = cur_inc or []
+                            cur_inc.append({
+                                "label": f"Increase {len(cur_inc)+1}",
+                                "categories": {"checked": [], "expanded": []},
+                                "conversion_factor": 1.0
+                            })
+                            current["increase"] = cur_inc
+                            st.session_state.solutions[idx] = current
+                            st.rerun()
 
-            if submitted:
-                st.success(f"✅ Configuration for '{new_name}' saved.")
+                    if save_clicked:
+                        local["increase"] = updated_increase_groups
+                        idx = _idx_of(st.session_state.solutions, sid)
+                        if idx is not None:
+                            st.session_state.solutions[idx] = local
+                            st.success(f"✅ Configuration for '{local['name']}' saved.")
+                            st.rerun()
 
-            if delete_clicked:
-                to_delete.append(i)
-
-    if to_delete:
-        for idx in sorted(to_delete, reverse=True):
-            deleted_name = st.session_state.solutions[idx]["name"]
-            del st.session_state.solutions[idx]
-            st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
-
+                else:
+                    # Fallback (future types)
+                    save_clicked = st.form_submit_button("💾 Save configuration")
+                    if save_clicked:
+                        idx = _idx_of(st.session_state.solutions, sid)
+                        if idx is not None:
+                            st.session_state.solutions[idx] = local
+                            st.success(f"✅ Configuration for '{local['name']}' saved.")
+                            st.rerun()
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA
