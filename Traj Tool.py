@@ -339,9 +339,10 @@ with tabs[3]:
 
         
         select_solution(data, years)
-        projected_with_solutions = apply_solutions(projected, years)
+        projected_with_solutions = apply_solutions(projected_with_structural, years)
 
-        
+       
+    
 
     else:
         st.info("Please upload your footprint file in the Home tab.")
@@ -358,7 +359,7 @@ with tabs[4]:
         st.markdown("### Projected Data with Solutions Applied")
         st.dataframe(projected_with_solutions, use_container_width=True)
 
-        df_emissions_before = compute_emissions_per_year(projected, years)
+        df_emissions_before = compute_emissions_per_year(projected_with_structural, years)
         df_emissions_after = compute_emissions_per_year(projected_with_solutions, years)
         df_avoided = compute_avoided_emissions(df_emissions_before, df_emissions_after, years)
         
@@ -380,17 +381,16 @@ with tabs[4]:
         #st.dataframe(df_avoided[[f"Emissions_{y}" for y in years]].style.format("{:.2f}"), use_container_width=True) 
         
         
-        ef_weights, val_weights = build_solution_weights_table(projected, years, st.session_state.solutions)
-        diagnostic_df = build_diagnostic_weights_table(projected, years, ef_weights, val_weights)
+        ef_weights, val_weights = build_solution_weights_table(projected_with_structural, years, st.session_state.solutions)
+        diagnostic_df = build_diagnostic_weights_table(projected_with_structural, years, ef_weights, val_weights)
         diagnostic_df_str = diagnostic_df.applymap(lambda cell: ", ".join(f"{s}: {v}%" for s, v in cell) if isinstance(cell, list) else "")
 
         #st.markdown("### 📊 Diagnostic of solution weights")
         #st.dataframe(diagnostic_df_str, use_container_width=True)
 
-        impact_df = compute_solution_impact_from_diagnostic(projected,projected_with_solutions,df_avoided,diagnostic_df,years)
+        impact_df = compute_solution_impact_from_diagnostic(projected_with_structural,projected_with_solutions,df_avoided,diagnostic_df,years)
         st.markdown("### 🧮 Final attribution of emissions reduction by solution")
         st.dataframe(impact_df.style.format("{:.2f}"), use_container_width=True)
-    
         
     else:
         st.info("Please upload your footprint file in the Home tab.")
