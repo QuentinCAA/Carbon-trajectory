@@ -134,11 +134,12 @@ def select_solution(data, years):
     Features:
     ----------
     - Each solution includes an editable 'description' field.
-    - By default, only key info (number, name, type, target, optional description) is shown.
-    - Full details are hidden in an expandable section.
-    - Solutions can be reordered or deleted.
-    - Stable UUIDs ensure no widget key conflicts.
+    - Full configuration available inside expandable sections.
+    - Solutions can be reordered or deleted safely.
+    - Handles both 'simple' and 'mixed' solution types.
+    - Robust structure normalization to prevent Streamlit Cloud rendering bugs.
     """
+
     import uuid
     import re
     from copy import deepcopy
@@ -156,59 +157,80 @@ def select_solution(data, years):
         unsafe_allow_html=True
     )
 
-    # Safety check
+    # =========================================================
+    # --- SAFETY CHECK ---
+    # =========================================================
     if "solutions" not in st.session_state or not st.session_state.solutions:
         st.info("No solutions available yet. Please create one first.")
         return
 
-    # --- Ensure stable id, description and structure for all solutions
+    # =========================================================
+    # --- ENSURE STABLE STRUCTURE FOR ALL SOLUTIONS ---
+    # =========================================================
     for sol in st.session_state.solutions:
+        # Assign UUID if missing
         if "id" not in sol or not sol["id"]:
             sol["id"] = str(uuid.uuid4())
+
+        # Ensure 'description' field exists
         if "description" not in sol:
             sol["description"] = ""
+
+        # Ensure consistent structure for mixed solutions
         if sol.get("type") == "mixed":
             inc = sol.get("increase", [])
-            if isinstance(inc, dict):
-                sol["increase"] = [inc]
-            elif inc is None:
+            if inc is None:
                 sol["increase"] = []
+            elif isinstance(inc, dict):
+                sol["increase"] = [inc]
+            # Ensure reduction is always properly nested
+            red = sol.get("reduction", {})
+            if not isinstance(red, dict):
+                sol["reduction"] = {"categories": {"checked": [], "expanded": []}}
+            else:
+                cats = red.get("categories", {})
+                sol["reduction"]["categories"] = {
+                    "checked": cats.get("checked", []),
+                    "expanded": cats.get("expanded", [])
+                }
 
-    # Build category tree once
+    # Build the hierarchical tree once
     tree = build_tree(data)
 
-    # Helper to find index by id
+    # Helper function: find solution index by ID
     def _idx_of(solutions, sid):
         for ii, ss in enumerate(solutions):
             if ss["id"] == sid:
                 return ii
         return None
 
+    # 3-column layout for compact view
     cols = st.columns(3)
 
-    # === Render one card per solution ===
+    # =========================================================
+    # --- MAIN LOOP: DISPLAY EACH SOLUTION ---
+    # =========================================================
     for i, sol in enumerate(st.session_state.solutions):
         sid = sol["id"]
         col = cols[i % 3]
         local = deepcopy(sol)
 
         with col.container(border=True):
-            # ───────────────────────────────────────────────
-            # Header: basic info (always visible)
-            # ───────────────────────────────────────────────
+            # -----------------------------------------------------
+            # Header — Always visible summary
+            # -----------------------------------------------------
             st.markdown(f"### 💡 {i + 1}. {local['name']}")
             st.markdown(f"**Type:** {local['type']} | **Target:** {local['target']}")
 
-            # Optional description preview
             if local.get("description"):
                 st.markdown(
                     f"<div style='color: grey; font-size: 0.9em;'>{local['description']}</div>",
                     unsafe_allow_html=True,
                 )
 
-            # ───────────────────────────────────────────────
-            # Buttons row (reorder / delete)
-            # ───────────────────────────────────────────────
+            # -----------------------------------------------------
+            # Buttons: move up / down / delete
+            # -----------------------------------------------------
             b1, b2, b3 = st.columns([1, 1, 1])
             with b1:
                 if st.button("⬆️ Move up", key=f"btn_up_{sid}", use_container_width=True) and i > 0:
@@ -216,12 +238,14 @@ def select_solution(data, years):
                     sols[i - 1], sols[i] = sols[i], sols[i - 1]
                     st.session_state.solutions = sols
                     st.rerun()
+
             with b2:
                 if st.button("⬇️ Move down", key=f"btn_down_{sid}", use_container_width=True) and i < len(st.session_state.solutions) - 1:
                     sols = st.session_state.solutions
                     sols[i + 1], sols[i] = sols[i], sols[i + 1]
                     st.session_state.solutions = sols
                     st.rerun()
+
             with b3:
                 if st.button("🗑️ Delete", key=f"btn_del_{sid}", type="secondary", use_container_width=True):
                     deleted_name = st.session_state.solutions[i]["name"]
@@ -229,12 +253,12 @@ def select_solution(data, years):
                     st.warning(f"🗑️ Solution '{deleted_name}' deleted.")
                     st.rerun()
 
-            # ───────────────────────────────────────────────
-            # Expandable section for detailed configuration
-            # ───────────────────────────────────────────────
+            # -----------------------------------------------------
+            # Expandable detailed configuration form
+            # -----------------------------------------------------
             with st.expander("🔧 Expand details", expanded=False):
                 with st.form(f"form_edit_solution_{sid}"):
-                    # --- Editable name & description
+                    # === Editable name & description ===
                     local["name"] = st.text_input("Solution name", value=local["name"], key=f"name_{sid}")
                     local["description"] = st.text_area(
                         "Description (optional)",
@@ -246,7 +270,7 @@ def select_solution(data, years):
 
                     st.markdown(f"- **Type:** `{local['type']}` | **Target:** `{local['target']}`")
 
-                    # --- Decarbonation potential
+                    # === Decarbonation potential ===
                     decarb_pct = st.number_input(
                         "Decarbonation potential (%) — e.g. 20 = 20% max reduction",
                         min_value=0.0, max_value=100.0,
@@ -256,7 +280,7 @@ def select_solution(data, years):
                     )
                     local["decarbonation_potential"] = decarb_pct / 100.0
 
-                    # --- Start year
+                    # === Start year ===
                     start_year = local.get("start_year", years[0])
                     start_year = start_year if start_year in years else years[0]
                     local["start_year"] = st.selectbox(
@@ -266,7 +290,7 @@ def select_solution(data, years):
                         key=f"start_{sid}"
                     )
 
-                    # --- Implementation targets
+                    # === Implementation targets ===
                     st.markdown("### Implementation level per year")
                     available_years = [y for y in years if y >= local["start_year"]]
                     year_targets = (local.get("years_targets", {}) or {})
@@ -291,7 +315,9 @@ def select_solution(data, years):
                         local_targets[str(y)] = pct / 100.0
                     local["years_targets"] = local_targets
 
-                    # --- Category selection
+                    # =========================================================
+                    # --- SIMPLE SOLUTIONS ---
+                    # =========================================================
                     if local["type"] == "simple":
                         st.markdown("### Categories impacted by this solution")
                         selection = tree_select(
@@ -302,30 +328,46 @@ def select_solution(data, years):
                         )
                         local["categories"] = selection
 
-                        save_clicked = st.form_submit_button("💾 Save configuration")
-                        if save_clicked:
+                        if st.form_submit_button("💾 Save configuration"):
                             idx = _idx_of(st.session_state.solutions, sid)
                             if idx is not None:
                                 st.session_state.solutions[idx] = local
                                 st.success(f"✅ Configuration for '{local['name']}' saved.")
                                 st.rerun()
 
+                    # =========================================================
+                    # --- MIXED SOLUTIONS ---
+                    # =========================================================
                     elif local["type"] == "mixed":
+                        # --- Ensure proper nested structure (fix for Streamlit Cloud bug) ---
+                        if "reduction" not in local or not isinstance(local["reduction"], dict):
+                            local["reduction"] = {"categories": {"checked": [], "expanded": []}}
+                        elif "categories" not in local["reduction"]:
+                            local["reduction"]["categories"] = {"checked": [], "expanded": []}
+                        else:
+                            cats = local["reduction"]["categories"]
+                            local["reduction"]["categories"] = {
+                                "checked": cats.get("checked", []),
+                                "expanded": cats.get("expanded", [])
+                            }
+
+                        # --- Reduction categories ---
                         st.markdown("### 📉 Categories to reduce")
                         reduction = tree_select(
                             tree,
-                            checked=local.get("reduction", {}).get("categories", {}).get("checked", []),
-                            expanded=local.get("reduction", {}).get("categories", {}).get("expanded", []),
+                            checked=local["reduction"]["categories"]["checked"],
+                            expanded=local["reduction"]["categories"]["expanded"],
                             key=f"tree_red_{sid}"
                         )
                         local["reduction"] = {"categories": reduction}
 
+                        # --- Increase categories ---
                         st.markdown("### 📈 Categories to increase")
                         increase_groups = local.get("increase", [])
-                        if isinstance(increase_groups, dict):
-                            increase_groups = [increase_groups]
                         if increase_groups is None:
                             increase_groups = []
+                        elif isinstance(increase_groups, dict):
+                            increase_groups = [increase_groups]
 
                         updated_increase_groups = []
                         for j, inc in enumerate(increase_groups):
@@ -381,7 +423,6 @@ def select_solution(data, years):
                                 st.session_state.solutions[idx] = local
                                 st.success(f"✅ Configuration for '{local['name']}' saved.")
                                 st.rerun()
-
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA

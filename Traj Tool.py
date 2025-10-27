@@ -333,11 +333,7 @@ with tabs[3]:
                 s["name"]: s.get("years_targets", {}) 
                 for s in st.session_state.get("solutions", [])
             }
-        
-
-
-
-        
+               
         select_solution(data, years)
         projected_with_solutions = apply_solutions(projected_with_structural, years)
 
