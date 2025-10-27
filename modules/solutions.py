@@ -466,7 +466,7 @@ def apply_solutions(df, years):
                     col = f"{target_field}_{year}"
                     total_increase = yearly_reductions[year] * factor
                     if affected_rows:
-                        per_row_increase = total_increase 
+                        per_row_increase = total_increase / len(affected_rows)
                         for idx in affected_rows:
                             modified_df.at[idx, col] += per_row_increase
 
