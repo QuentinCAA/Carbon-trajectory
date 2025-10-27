@@ -183,6 +183,8 @@ def select_solution(data, years):
 
     # Build category tree once
     tree = build_tree(data)
+    st.caption(f"🌳 DEBUG: tree built with {len(tree)} top-level nodes.")
+
 
     # Helper to find index by id
     def _idx_of(solutions, sid):
