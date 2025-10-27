@@ -127,37 +127,11 @@ def create_solution():
 # =========================================================
 # 3️⃣ CONFIGURATION / ASSIGNMENT (stable keys + clean actions)
 # =========================================================
-# -*- coding: utf-8 -*-
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Oct 27 13:52:12 2025
-
-@author: quent
-"""
 
 @st.cache_data(show_spinner=False)
 def get_tree(data):
     """
     Build and cache the hierarchical tree to avoid race conditions on Streamlit Cloud.
-    The cache ensures the tree is instantly available on reruns, eliminating latency issues.
-    """
-    if data is None or data.empty:
-        return []
-    return build_tree(data)
-
-
-# -*- coding: utf-8 -*-
-"""
-DEBUG version – adds extensive visibility to diagnose Cloud rendering issues
-Created on Mon Oct 27 13:52:12 2025
-@author: quent
-"""
-
-@st.cache_data(show_spinner=False)
-def get_tree(data):
-    """
-    Build and cache the hierarchical tree to avoid race conditions on Streamlit Cloud.
-    Includes debug logs for shape and node count.
     """
     if data is None or data.empty:
         st.warning("⚠️ get_tree(): received empty DataFrame.")
@@ -170,20 +144,22 @@ def get_tree(data):
 def select_solution(data, years):
     """
     Configure, rename, reorder, or delete existing mitigation solutions.
-    DEBUG VERSION — instrumented for Cloud behaviour diagnostics.
+    (Full version with debug messages for Cloud)
     """
     import uuid
     from copy import deepcopy
     from streamlit_tree_select import tree_select
 
-    st.subheader("⚙️ Configure existing solutions (DEBUG MODE)")
+    st.subheader("⚙️ Configure existing solutions (FULL DEBUG MODE)")
 
-    # Safety check
+    # =========================================================
+    # SAFETY CHECK
+    # =========================================================
     if "solutions" not in st.session_state or not st.session_state.solutions:
         st.info("No solutions available yet. Please create one first.")
         st.stop()
 
-    # Normalize global structures
+    # Normalize base structures
     for sol in st.session_state.solutions:
         if "id" not in sol or not sol["id"]:
             sol["id"] = str(uuid.uuid4())
@@ -199,7 +175,7 @@ def select_solution(data, years):
                 sol["increase"] = [inc]
 
     # =========================================================
-    # --- TREE BUILD / CACHE ---
+    # TREE BUILD
     # =========================================================
     tree = get_tree(data)
     if not tree:
@@ -217,7 +193,7 @@ def select_solution(data, years):
     cols = st.columns(3)
 
     # =========================================================
-    # --- MAIN LOOP ---
+    # MAIN LOOP
     # =========================================================
     for i, sol in enumerate(st.session_state.solutions):
         sid = sol["id"]
@@ -225,99 +201,207 @@ def select_solution(data, years):
         local = deepcopy(sol)
 
         with col.container(border=True):
+            # HEADER
             st.markdown(f"### 💡 {i + 1}. {local['name']}")
             st.caption(f"🔍 DEBUG: Rendering solution ID={sid}, type={local['type']}")
 
-            # --------------------------------------------------
-            # SIMPLE SOLUTIONS
-            # --------------------------------------------------
-            if local["type"] == "simple":
-                st.markdown("### 🌿 Categories impacted by this simple solution")
-                cats = local.get("categories", {})
-                st.caption(f"🔧 DEBUG(simple): categories keys={list(cats.keys()) if isinstance(cats,dict) else 'not dict'}")
+            # MOVE / DELETE BUTTONS
+            b1, b2, b3 = st.columns([1, 1, 1])
+            with b1:
+                if st.button("⬆️", key=f"btn_up_{sid}", use_container_width=True) and i > 0:
+                    sols = st.session_state.solutions
+                    sols[i - 1], sols[i] = sols[i], sols[i - 1]
+                    st.session_state.solutions = sols
+                    st.rerun()
+            with b2:
+                if st.button("⬇️", key=f"btn_down_{sid}", use_container_width=True) and i < len(st.session_state.solutions) - 1:
+                    sols = st.session_state.solutions
+                    sols[i + 1], sols[i] = sols[i], sols[i + 1]
+                    st.session_state.solutions = sols
+                    st.rerun()
+            with b3:
+                if st.button("🗑️", key=f"btn_del_{sid}", use_container_width=True):
+                    del st.session_state.solutions[i]
+                    st.warning(f"🗑️ Deleted solution {local['name']}")
+                    st.rerun()
 
-                try:
-                    selection = tree_select(
-                        tree,
-                        checked=cats.get("checked", []),
-                        expanded=cats.get("expanded", []),
-                        key=f"tree_simple_{sid}"
+            # EXPANDER FORM
+            with st.expander("🔧 Edit configuration", expanded=False):
+                with st.form(f"form_edit_solution_{sid}"):
+                    st.markdown("#### ✏️ General information")
+                    local["name"] = st.text_input("Solution name", value=local["name"], key=f"name_{sid}")
+                    local["description"] = st.text_area(
+                        "Description (optional)",
+                        value=local.get("description", ""),
+                        key=f"desc_{sid}",
+                        height=80,
                     )
-                    st.caption("✅ DEBUG(simple): tree_select executed successfully.")
-                except Exception as e:
-                    st.error(f"❌ DEBUG(simple): tree_select crashed — {e}")
-                    selection = {"checked": [], "expanded": []}
 
-                local["categories"] = selection
+                    st.markdown(f"- **Type:** `{local['type']}` | **Target:** `{local['target']}`")
 
-            # --------------------------------------------------
-            # MIXED SOLUTIONS
-            # --------------------------------------------------
-            elif local["type"] == "mixed":
-                st.markdown("### ⚙️ Mixed solution debug section")
-
-                # --- normalize reduction ---
-                red = local.get("reduction", {})
-                if not isinstance(red, dict):
-                    st.warning("⚠️ DEBUG(mixed): reduction not dict → reset")
-                    red = {"categories": {"checked": [], "expanded": []}}
-                cats = red.get("categories", {})
-                if not isinstance(cats, dict):
-                    st.warning("⚠️ DEBUG(mixed): categories not dict → reset")
-                    cats = {"checked": [], "expanded": []}
-                red["categories"] = {
-                    "checked": cats.get("checked", []),
-                    "expanded": cats.get("expanded", [])
-                }
-                local["reduction"] = red
-                st.caption(f"🧩 DEBUG(mixed): reduction keys={list(local['reduction']['categories'].keys())}")
-
-                # --- tree_select for reduction ---
-                st.markdown("### 📉 Categories to reduce")
-                try:
-                    reduction = tree_select(
-                        tree,
-                        checked=local["reduction"]["categories"]["checked"],
-                        expanded=local["reduction"]["categories"]["expanded"],
-                        key=f"tree_red_{sid}"
+                    # Decarbonation potential
+                    decarb_pct = st.number_input(
+                        "Decarbonation potential (%)",
+                        min_value=0.0, max_value=100.0,
+                        value=float(local.get("decarbonation_potential", 0.0) * 100),
+                        format="%.2f",
+                        key=f"potential_{sid}"
                     )
-                    st.caption("✅ DEBUG(mixed): reduction tree rendered.")
-                except Exception as e:
-                    st.error(f"❌ DEBUG(mixed): reduction tree failed — {e}")
-                    reduction = {"checked": [], "expanded": []}
+                    local["decarbonation_potential"] = decarb_pct / 100.0
 
-                local["reduction"] = {"categories": reduction}
+                    # Start year
+                    start_year = local.get("start_year", years[0])
+                    if start_year not in years:
+                        start_year = years[0]
+                    local["start_year"] = st.selectbox(
+                        "Start year",
+                        years,
+                        index=years.index(start_year),
+                        key=f"start_{sid}"
+                    )
 
-                # --- increase groups ---
-                st.markdown("### 📈 Categories to increase")
-                inc_groups = local.get("increase", [])
-                if inc_groups is None:
-                    st.warning("⚠️ DEBUG(mixed): increase None → []")
-                    inc_groups = []
-                elif isinstance(inc_groups, dict):
-                    st.warning("⚠️ DEBUG(mixed): increase dict → [dict]")
-                    inc_groups = [inc_groups]
-                st.caption(f"🔧 DEBUG(mixed): increase groups count={len(inc_groups)}")
+                    # Implementation level
+                    st.markdown("#### 🎯 Implementation level per year")
+                    available_years = [y for y in years if y >= local["start_year"]]
+                    year_targets = (local.get("years_targets", {}) or {})
+                    year_targets = {str(k): float(v) for k, v in year_targets.items()}
 
-                for j, inc in enumerate(inc_groups):
-                    st.markdown(f"#### ➕ Increase group {j+1}")
-                    st.caption(f"🔍 DEBUG(mixed): group {j+1} label={inc.get('label','?')}")
-                    try:
-                        inc_selection = tree_select(
-                            tree,
-                            checked=inc.get('categories', {}).get('checked', []),
-                            expanded=inc.get('categories', {}).get('expanded', []),
-                            key=f"tree_inc_{sid}_{j}"
+                    selected_years = st.multiselect(
+                        "Select target years",
+                        available_years,
+                        default=sorted(int(y) for y in year_targets.keys()),
+                        key=f"years_{sid}"
+                    )
+
+                    local_targets = {}
+                    for y in selected_years:
+                        pct = st.number_input(
+                            f"{y} (% of max effect)",
+                            min_value=0.0, max_value=100.0,
+                            value=float(year_targets.get(str(y), 0.0) * 100),
+                            format="%.2f",
+                            key=f"{sid}_impl_{y}"
                         )
-                        st.caption(f"✅ DEBUG(mixed): increase tree {j+1} rendered.")
-                    except Exception as e:
-                        st.error(f"❌ DEBUG(mixed): increase tree {j+1} failed — {e}")
-                        inc_selection = {"checked": [], "expanded": []}
-                    inc["categories"] = inc_selection
+                        local_targets[str(y)] = pct / 100.0
+                    local["years_targets"] = local_targets
 
-            # --- finalize without rerun (debug mode) ---
+                    # =========================================================
+                    # SIMPLE SOLUTIONS
+                    # =========================================================
+                    if local["type"] == "simple":
+                        st.markdown("### 🌿 Categories impacted by this simple solution")
+                        cats = local.get("categories", {})
+                        st.caption(f"🔧 DEBUG(simple): categories keys={list(cats.keys()) if isinstance(cats,dict) else 'not dict'}")
+
+                        try:
+                            selection = tree_select(
+                                tree,
+                                checked=cats.get("checked", []),
+                                expanded=cats.get("expanded", []),
+                                key=f"tree_simple_{sid}"
+                            )
+                            st.caption("✅ DEBUG(simple): tree_select executed successfully.")
+                        except Exception as e:
+                            st.error(f"❌ DEBUG(simple): tree_select crashed — {e}")
+                            selection = {"checked": [], "expanded": []}
+
+                        local["categories"] = selection
+
+                    # =========================================================
+                    # MIXED SOLUTIONS
+                    # =========================================================
+                    elif local["type"] == "mixed":
+                        st.markdown("### ⚙️ Mixed solution configuration")
+
+                        # --- normalize reduction ---
+                        red = local.get("reduction", {})
+                        if not isinstance(red, dict):
+                            st.warning("⚠️ DEBUG(mixed): reduction not dict → reset")
+                            red = {"categories": {"checked": [], "expanded": []}}
+                        cats = red.get("categories", {})
+                        if not isinstance(cats, dict):
+                            st.warning("⚠️ DEBUG(mixed): categories not dict → reset")
+                            cats = {"checked": [], "expanded": []}
+                        red["categories"] = {
+                            "checked": cats.get("checked", []),
+                            "expanded": cats.get("expanded", [])
+                        }
+                        local["reduction"] = red
+                        st.caption(f"🧩 DEBUG(mixed): reduction keys={list(local['reduction']['categories'].keys())}")
+
+                        # --- tree_select for reduction ---
+                        st.markdown("### 📉 Categories to reduce")
+                        try:
+                            reduction = tree_select(
+                                tree,
+                                checked=local["reduction"]["categories"]["checked"],
+                                expanded=local["reduction"]["categories"]["expanded"],
+                                key=f"tree_red_{sid}"
+                            )
+                            st.caption("✅ DEBUG(mixed): reduction tree rendered.")
+                        except Exception as e:
+                            st.error(f"❌ DEBUG(mixed): reduction tree failed — {e}")
+                            reduction = {"checked": [], "expanded": []}
+                        local["reduction"] = {"categories": reduction}
+
+                        # --- increase groups ---
+                        st.markdown("### 📈 Categories to increase")
+                        inc_groups = local.get("increase", [])
+                        if inc_groups is None:
+                            st.warning("⚠️ DEBUG(mixed): increase None → []")
+                            inc_groups = []
+                        elif isinstance(inc_groups, dict):
+                            st.warning("⚠️ DEBUG(mixed): increase dict → [dict]")
+                            inc_groups = [inc_groups]
+                        st.caption(f"🔧 DEBUG(mixed): increase groups count={len(inc_groups)}")
+
+                        updated_increase_groups = []
+                        for j, inc in enumerate(inc_groups):
+                            st.markdown(f"#### ➕ Increase group {j+1}")
+                            label = st.text_input(
+                                "Label",
+                                value=inc.get("label", f"Increase {j+1}"),
+                                key=f"inc_label_{sid}_{j}"
+                            )
+                            factor = st.number_input(
+                                "Conversion factor",
+                                min_value=0.01,
+                                format="%.2f",
+                                value=float(inc.get("conversion_factor", 1.0)),
+                                key=f"factor_{sid}_{j}"
+                            )
+                            try:
+                                inc_selection = tree_select(
+                                    tree,
+                                    checked=inc.get('categories', {}).get('checked', []),
+                                    expanded=inc.get('categories', {}).get('expanded', []),
+                                    key=f"tree_inc_{sid}_{j}"
+                                )
+                                st.caption(f"✅ DEBUG(mixed): increase tree {j+1} rendered.")
+                            except Exception as e:
+                                st.error(f"❌ DEBUG(mixed): increase tree {j+1} failed — {e}")
+                                inc_selection = {"checked": [], "expanded": []}
+                            remove = st.checkbox(f"❌ Remove group {j+1}", key=f"remove_inc_{sid}_{j}")
+                            if not remove:
+                                updated_increase_groups.append({
+                                    "label": label,
+                                    "conversion_factor": factor,
+                                    "categories": inc_selection
+                                })
+                        local["increase"] = updated_increase_groups
+
+                    # =========================================================
+                    # SAVE BUTTON
+                    # =========================================================
+                    save_clicked = st.form_submit_button("💾 Save configuration")
+                    if save_clicked:
+                        idx = _idx_of(st.session_state.solutions, sid)
+                        if idx is not None:
+                            st.session_state.solutions[idx] = local
+                            st.success(f"✅ Saved '{local['name']}' successfully.")
+                            st.rerun()
+
             st.caption(f"💾 DEBUG: finished rendering solution {local['name']}")
-
 
 # =========================================================
 # 4️⃣ APPLICATION TO DATA
