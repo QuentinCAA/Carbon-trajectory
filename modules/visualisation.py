@@ -115,7 +115,6 @@ def compute_solution_percentages(impact_df, emissions_before_df):
         sorted by 'Total' descending.
     """
     import numpy as np
-    import pandas as pd
 
     df = impact_df.copy()
 
@@ -381,12 +380,22 @@ def plot_annual_emissions_reduction(
 
     if show_percentage_annotation:
         final_year = years[-1]
+        start_year = years[0]
         without = emissions_by_year.loc[final_year]
+        without1 = emissions_by_year.loc[start_year]
         with_action = trajectory.loc[final_year]
-        percent_reduction = 100 * (1 - with_action / without)
+        relative_percent_reduction = 100 * (1 - with_action / without)
+        absolute_percent_reduction = 100 * (1 - with_action / without1)
         fig.text(
             0.88, 0.52,
-            f"{percent_reduction:.0f}%\nreduction\nin {final_year}",
+            f"{relative_percent_reduction:.0f}%\nrelative_percenatge_reduction\nin {final_year}",
+            fontsize=12, color="red",
+            ha="center", va="top",
+            bbox=dict(facecolor="white", edgecolor="red", boxstyle="round,pad=0.4")
+        )
+        fig.text(
+            0.88, 0.22,
+            f"{absolute_percent_reduction:.0f}%\nabsolute_percentage_reduction\nin {final_year}",
             fontsize=12, color="red",
             ha="center", va="top",
             bbox=dict(facecolor="white", edgecolor="red", boxstyle="round,pad=0.4")
