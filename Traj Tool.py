@@ -91,7 +91,7 @@ from modules.solutions import (
     init_solutions, select_solution, apply_solutions, create_solution,
     compute_avoided_emissions, compute_emissions_per_year,
     build_diagnostic_weights_table, build_solution_weights_table,
-    compute_solution_impact_from_diagnostic
+    compute_solution_impact_from_diagnostic, build_weights_summary_table , build_weights_debug_table
 )
 from modules.visualisation import (
     choose_solution_colors_and_order, plot_cumulative_emissions_reduction,
@@ -110,6 +110,68 @@ def has_loaded_data():
     """True if we have both a baseline dataset and a list of projection years."""
     return "data" in st.session_state and "years" in st.session_state
 
+def run_results_computation():
+    """
+    Run the heavy results pipeline once and cache all intermediate outputs
+    in Streamlit session state.
+
+    This function:
+    - Computes emissions before and after solutions.
+    - Computes avoided emissions.
+    - Builds EF/Value weight tables per solution (isolated impact method).
+    - Builds the diagnostic matrix used for attribution.
+    - Computes the final impact per solution and per year.
+
+    It MUST be called explicitly (via a button) to avoid recalculating
+    everything on every small UI change (especially in the Solutions tab).
+    """
+    if not has_loaded_data():
+        st.warning("No data loaded. Please upload your footprint file first.")
+        return
+
+    years = st.session_state["years"]
+    projected_with_structural = st.session_state.get("projected_with_structural")
+    projected_with_solutions = st.session_state.get("projected_with_solutions")
+
+    if projected_with_structural is None or projected_with_solutions is None:
+        st.warning(
+            "Missing intermediate scenarios. Please make sure you have completed "
+            "Growth and Structural Effects tabs before running the results."
+        )
+        return
+
+    # 1) Emissions before / after solutions
+    df_emissions_before = compute_emissions_per_year(projected_with_structural, years)
+    df_emissions_after = compute_emissions_per_year(projected_with_solutions, years)
+    df_avoided = compute_avoided_emissions(df_emissions_before, df_emissions_after, years)
+
+    # 2) Build solution weight tables (isolated impact approach)
+    ef_weights, val_weights = build_solution_weights_table(
+        projected_with_structural, years, st.session_state.solutions
+    )
+
+    # 3) Diagnostic table (weights per row / year / EF or Value)
+    diagnostic_df = build_diagnostic_weights_table(
+        projected_with_structural, years, ef_weights, val_weights
+    )
+
+    # 4) Final attribution per solution and per year
+    impact_df = compute_solution_impact_from_diagnostic(
+        projected_with_structural,
+        projected_with_solutions,
+        df_avoided,
+        diagnostic_df,
+        years
+    )
+
+    # 5) Cache everything in session_state for reuse in Results + Visualisations
+    st.session_state["df_emissions_before"] = df_emissions_before
+    st.session_state["df_emissions_after"] = df_emissions_after
+    st.session_state["df_avoided"] = df_avoided
+    st.session_state["ef_weights"] = ef_weights
+    st.session_state["val_weights"] = val_weights
+    st.session_state["diagnostic_df"] = diagnostic_df
+    st.session_state["impact_df"] = impact_df
 
 # =========================================
 # 2. Tab 1: Home
@@ -417,40 +479,160 @@ with tabs[4]:
         projected_with_structural = st.session_state.get("projected_with_structural")
         projected_with_solutions = st.session_state.get("projected_with_solutions")
 
-        st.markdown("### Projected Data with Solutions Applied")
-        st.dataframe(projected_with_solutions, use_container_width=True)
+        # -----------------------------------------------------
+        # 🚀 Manual trigger to run / refresh all heavy results
+        # -----------------------------------------------------
+        st.markdown("### ⚙️ Run / refresh results computation")
+        if st.button("🚀 Run / refresh results", key="run_results_button"):
+            run_results_computation()
 
-        df_emissions_before = compute_emissions_per_year(projected_with_structural, years)
-        df_emissions_after = compute_emissions_per_year(projected_with_solutions, years)
-        df_avoided = compute_avoided_emissions(df_emissions_before, df_emissions_after, years)
+        # Retrieve cached outputs (if any)
+        impact_df = st.session_state.get("impact_df", pd.DataFrame())
+        df_emissions_before = st.session_state.get("df_emissions_before", pd.DataFrame())
+        df_emissions_after = st.session_state.get("df_emissions_after", pd.DataFrame())
+        df_avoided = st.session_state.get("df_avoided", pd.DataFrame())
+        ef_weights = st.session_state.get("ef_weights", {})
+        val_weights = st.session_state.get("val_weights", {})
+        diagnostic_df = st.session_state.get("diagnostic_df", pd.DataFrame())
 
-        # If needed, keep only the emissions columns
-        df_only_emissions_before = df_emissions_before[[f"Emissions_{y}" for y in years]]
+        # If nothing cached yet, ask the user to run the computation
+        if impact_df.empty or df_emissions_before.empty or df_emissions_after.empty or df_avoided.empty:
+            st.info(
+                "Results are not available yet. "
+                "Please click **'🚀 Run / refresh results'** above after you have "
+                "configured growth, structural effects, and solutions."
+            )
+        else:
+            # -------------------------------
+            # Show projected data with solutions
+            # -------------------------------
+            st.markdown("### Projected Data with Solutions Applied")
+            st.dataframe(projected_with_solutions, use_container_width=True)
 
-        # Build weights & diagnostic (solutions’ shares per row/year)
-        ef_weights, val_weights = build_solution_weights_table(
-            projected_with_structural, years, st.session_state.solutions
-        )
-        diagnostic_df = build_diagnostic_weights_table(
-            projected_with_structural, years, ef_weights, val_weights
-        )
-        diagnostic_df_str = diagnostic_df.applymap(
-            lambda cell: ", ".join(f"{s}: {v}%" for s, v in cell) if isinstance(cell, list) else ""
-        )
+            # -------------------------------
+            # Debug: weights tables
+            # -------------------------------
+            with st.expander("🧪 Debug – solution weights table", expanded=False):
+                df_debug = build_weights_debug_table(ef_weights, val_weights, years)
 
-        # Final attribution of avoided emissions to each solution per year
-        impact_df = compute_solution_impact_from_diagnostic(
-            projected_with_structural,
-            projected_with_solutions,
-            df_avoided,
-            diagnostic_df,
-            years
-        )
-        st.session_state["impact_df"] = impact_df
-        st.session_state["df_emissions_before"] = df_emissions_before
+                if df_debug.empty:
+                    st.info("No non-zero weights found. Check your solutions configuration.")
+                else:
+                    # Optional: filter by solution for easier inspection
+                    solutions_list = sorted(df_debug["Solution"].unique())
+                    selected_solution = st.selectbox(
+                        "Filter by solution",
+                        options=["(All)"] + solutions_list,
+                        index=0,
+                    )
 
-        st.markdown("### 🧮 Final attribution of emissions reduction by solution")
-        st.dataframe(impact_df.style.format("{:.2f}"), use_container_width=True)
+                    if selected_solution != "(All)":
+                        df_to_show = df_debug[df_debug["Solution"] == selected_solution]
+                    else:
+                        df_to_show = df_debug
+
+                    st.markdown("### Detailed weights (non-zero only)")
+                    st.dataframe(df_to_show, use_container_width=True)
+
+                    # Optional: show an aggregated summary
+                    st.markdown("### Summary per solution / year / field")
+                    df_summary = build_weights_summary_table(df_debug)
+                    if selected_solution != "(All)":
+                        df_summary = df_summary[df_summary["Solution"] == selected_solution]
+
+                    st.dataframe(df_summary, use_container_width=True)
+
+            # -------------------------------
+            # Diagnostic table (human-readable)
+            # -------------------------------
+            diagnostic_df_str = diagnostic_df.applymap(
+                lambda cell: ", ".join(f"{s}: {v}%" for s, v in cell) if isinstance(cell, list) else ""
+            )
+
+            # -------------------------------
+            # Final impact table
+            # -------------------------------
+            st.markdown("### 🧮 Final attribution of emissions reduction by solution")
+            st.dataframe(impact_df.style.format("{:.2f}"), use_container_width=True)
+
+            # -------------------------------
+            # Mass-balance consistency check
+            # -------------------------------
+            with st.expander("🔎 Consistency check – mass balance of avoided emissions", expanded=False):
+                import numpy as np
+
+                # a) Total avoided emissions per year from df_avoided
+                emission_cols = [f"Emissions_{y}" for y in years if f"Emissions_{y}" in df_avoided.columns]
+
+                if not emission_cols:
+                    st.error("No emissions columns found in df_avoided – cannot run mass-balance check.")
+                else:
+                    avoided_per_year_raw = df_avoided[emission_cols].sum(axis=0)
+                    avoided_per_year = pd.Series(
+                        {y: avoided_per_year_raw.get(f"Emissions_{y}", 0.0) for y in years},
+                        index=years,
+                        name="Avoided emissions (before - after)"
+                    )
+
+                    # b) Total attributed to solutions per year from impact_df
+                    year_col_map = {}
+                    for col in impact_df.columns:
+                        try:
+                            col_year = int(col)
+                        except (ValueError, TypeError):
+                            continue
+                        if col_year in years:
+                            year_col_map[col_year] = col
+
+                    if not year_col_map:
+                        st.error("Could not find any year-like columns in the solution impact table – mass-balance check skipped.")
+                    else:
+                        common_years = sorted(year_col_map.keys())
+                        solutions_per_year_raw = impact_df[[year_col_map[y] for y in common_years]].sum(axis=0)
+                        solutions_per_year = pd.Series(
+                            {y: solutions_per_year_raw[year_col_map[y]] for y in common_years},
+                            index=common_years,
+                            name="Attributed to solutions"
+                        )
+
+                        avoided_aligned = avoided_per_year.reindex(common_years)
+
+                        check_df = pd.concat([avoided_aligned, solutions_per_year], axis=1)
+                        check_df["Residual"] = check_df["Attributed to solutions"] - check_df["Avoided emissions (before - after)"]
+
+                        total_avoided = avoided_aligned.sum()
+                        total_attributed = solutions_per_year.sum()
+                        total_residual = total_attributed - total_avoided
+
+                        st.markdown("#### Per-year comparison")
+                        st.dataframe(check_df.style.format("{:.4f}"), use_container_width=True)
+
+                        st.markdown("#### Global mass-balance check")
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            st.metric("Total avoided emissions (before - after)", f"{total_avoided:,.4f}")
+                        with col_b:
+                            st.metric("Total attributed to solutions", f"{total_attributed:,.4f}")
+                        with col_c:
+                            st.metric("Residual (attributed - avoided)", f"{total_residual:,.4f}")
+
+                        atol = max(1e-6, abs(total_avoided) * 1e-3)
+                        if abs(total_residual) <= atol:
+                            st.success(
+                                "✅ Mass balance OK: the sum of solution impacts is consistent with "
+                                "the difference between total emissions before and after solutions "
+                                f"(|residual| ≤ {atol:.4f})."
+                            )
+                        else:
+                            st.warning(
+                                "⚠️ Mass balance mismatch detected: the sum of impacts attributed to solutions "
+                                "does not perfectly match the total avoided emissions. This may indicate a bug "
+                                "in the attribution logic or in the weight calculations."
+                            )
+                            st.caption(
+                                "Tip: check the debug weights table above, especially for mixed solutions, "
+                                "to see which rows/years receive unexpected weights."
+                            )
 
     else:
         st.info("Please upload your footprint file in the Home tab.")
@@ -460,14 +642,132 @@ with tabs[4]:
 # 7. Tab 6: Visualisations
 # =========================================
 
+
+
 with tabs[5]:
     st.title("📊 Visualisations")
+    
+    # Optional: allow recomputing results directly from this tab
+    st.markdown("### ⚙️ Run / refresh results for visualisations")
+    if st.button("🚀 Run / refresh results & charts", key="run_results_from_visu"):
+        run_results_computation()
 
     # Retrieve what we need from session (guard usage)
     impact_df = st.session_state.get("impact_df", pd.DataFrame())
     df_emissions_before = st.session_state.get("df_emissions_before", pd.DataFrame())
 
     if has_loaded_data() and not impact_df.empty and not df_emissions_before.empty:
+
+        years = st.session_state["years"]
+        last_year = max(years)  # 🔚 We focus on the last projection year
+
+        # ---------------------------------------------------------
+        # 🧾 Emissions overview for last year (growth / structural / solutions)
+        # ---------------------------------------------------------
+        projected_growth_only = st.session_state.get("projected_growth_only")
+        projected_with_structural = st.session_state.get("projected_with_structural")
+        projected_with_solutions = st.session_state.get("projected_with_solutions")
+        data_baseline = st.session_state.get("data")
+
+        if (
+            projected_growth_only is not None
+            and projected_with_structural is not None
+            and projected_with_solutions is not None
+            and data_baseline is not None
+        ):
+        
+
+            # 1) Compute emissions per scenario and per year
+            df_em_growth = compute_emissions_per_year(projected_growth_only, years)
+            df_em_struct = compute_emissions_per_year(projected_with_structural, years)
+            df_em_solutions = compute_emissions_per_year(projected_with_solutions, years)
+
+            # 2) Extract total emissions for the last year
+            col_last = f"Emissions_{last_year}"
+
+            growth_only_total = df_em_growth[col_last].sum()
+            structural_total = df_em_struct[col_last].sum()
+            solutions_total = df_em_solutions[col_last].sum()
+
+            # 3) Total tonnes of CO₂ saved by solutions in the last year
+            saved_by_solutions_last_year = structural_total - solutions_total
+
+            # 4) Baseline emissions (initial footprint, from imported file)
+            #    We assume the input file contains a column 'Emissions'
+            #    with the baseline inventory (single year or average).
+            if "Emissions" in data_baseline.columns:
+                baseline_total = data_baseline["Emissions"].sum()
+            else:
+                baseline_total = np.nan
+
+            # 5) Percentage reductions
+            #    (we protect against division by zero or missing data)
+            if growth_only_total and growth_only_total != 0:
+                reduction_vs_growth_only_pct = (growth_only_total - solutions_total) / growth_only_total * 100.0
+            else:
+                reduction_vs_growth_only_pct = np.nan
+
+            if baseline_total and baseline_total != 0:
+                reduction_vs_baseline_pct = (baseline_total - solutions_total) / baseline_total * 100.0
+            else:
+                reduction_vs_baseline_pct = np.nan
+
+            # 6) Build a summary table
+            #    We keep two columns:
+            #      - "Emissions (tCO₂e)" for levels
+            #      - "Reduction (%)" for percentage indicators
+            #    Some rows will only have emissions, others only percentages.
+            summary_last_year = pd.DataFrame(
+                {
+                    "Scenario": [
+                        f"Growth only ({last_year})",
+                        f"Growth + structural effects ({last_year})",
+                        f"Growth + structural + solutions ({last_year})",
+                        f"Saved by solutions ({last_year})",
+                    ],
+                    "Emissions (tCO₂e)": [
+                        growth_only_total,
+                        structural_total,
+                        solutions_total,
+                        saved_by_solutions_last_year,
+                    ],
+                    "Reduction (%)": [np.nan, np.nan, np.nan, np.nan],
+                }
+            )
+
+            # Add two extra rows for percentage reductions
+            extra_rows = pd.DataFrame(
+                {
+                    "Scenario": [
+                        f"Reduction vs growth-only projection ({last_year})",
+                        "Reduction vs baseline footprint",
+                    ],
+                    "Emissions (tCO₂e)": [np.nan, np.nan],
+                    "Reduction (%)": [
+                        reduction_vs_growth_only_pct,
+                        reduction_vs_baseline_pct,
+                    ],
+                }
+            )
+
+            summary_last_year = pd.concat([summary_last_year, extra_rows], ignore_index=True)
+
+            st.markdown(f"### 🧾 Emissions overview for {last_year}")
+            st.dataframe(
+                summary_last_year.style.format(
+                    {
+                        "Emissions (tCO₂e)": "{:,.0f}",
+                        "Reduction (%)": "{:.1f}%"
+                    }
+                ),
+                use_container_width=True,
+            )
+
+        else:
+            st.info(
+                "Some intermediate scenarios are missing (growth-only / structural / solutions / baseline). "
+                "Please complete the previous tabs to enable the last-year overview table."
+            )
 
         # =========================================================
         # --- CONFIGURATION ---
@@ -480,18 +780,18 @@ with tabs[5]:
             help="If disabled, structural effects appear as a first solution."
         )
 
-        years = st.session_state["years"]
-
-        # =========================================================
+                # =========================================================
         # --- HANDLE STRUCTURAL EFFECTS TOGGLE ---
         # =========================================================
         if include_structural:
-            # ✅ Structural effects already included in EF baseline
+            # ✅ Structural effects already included in the 'No action' scenario
+            # Here, df_emissions_before is based on projected_with_structural
             df_emissions_base = df_emissions_before.copy()
 
         else:
-            # ❌ Structural effects shown as a separate solution
+            # ❌ Structural effects are displayed as a separate "solution"
             struct_impact = st.session_state.get("structural_effects_impact")
+            projected_growth_only = st.session_state.get("projected_growth_only")
 
             if struct_impact is not None:
                 # Prepare a clean DataFrame with unique index
@@ -502,7 +802,7 @@ with tabs[5]:
                 impact_df = impact_df.drop(index="Structural effects", errors="ignore")
                 impact_df = impact_df.loc[~impact_df.index.duplicated(keep="first")]
 
-                # Concatenate safely
+                # Concatenate safely (Structural effects appear as first "solution")
                 impact_df = pd.concat([struct_impact_df, impact_df])
 
                 # Initialize color configuration if not already present
@@ -517,7 +817,23 @@ with tabs[5]:
             else:
                 st.warning("Structural effects impact not found — please apply them in the Structural tab first.")
 
-            df_emissions_base = df_emissions_before.copy()
+            # 🧠 IMPORTANT: when structural effects are separated,
+            # the 'No action' scenario must be *growth only*,
+            # otherwise structural effects would be counted twice.
+            if projected_growth_only is not None:
+                df_emissions_base = compute_emissions_per_year(
+                    projected_growth_only,
+                    years
+                )
+            else:
+                # Fallback to df_emissions_before if something is missing,
+                # but warn the user because this is conceptually inconsistent.
+                st.warning(
+                    "Growth-only scenario not found in session state. "
+                    "Using the structural scenario as base, which may double-count structural effects."
+                )
+                df_emissions_base = df_emissions_before.copy()
+
 
         # =========================================================
         # --- COLORS + ORDER ---
@@ -587,6 +903,7 @@ with tabs[5]:
 
     else:
         st.info("Please upload a dataset first and compute results in the Results tab.")
+
 
 
 # =========================================

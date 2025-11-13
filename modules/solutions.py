@@ -475,71 +475,420 @@ def apply_solutions(df, years):
     return modified_df
 
 
+def apply_single_solution(df, years, sol):
+    """
+    Apply a *single* mitigation solution to a DataFrame in place.
+
+    This helper mirrors the logic used in `apply_solutions`, but only for one
+    solution at a time and WITHOUT any Streamlit UI.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame of projected data BEFORE applying this solution.
+        It is modified in place.
+    years : list[int]
+        List of years used to build column names like 'EF_2025', 'Value_2027', etc.
+    sol : dict
+        Solution configuration, as stored in `st.session_state.solutions`.
+        Must contain at least:
+        - 'name'
+        - 'type'  ('simple' or 'mixed')
+        - 'target' ('EF' or 'Value')
+        - 'decarbonation_potential' (ratio 0–1)
+        - 'years_targets' (dict) and optionally 'start_year'
+        - category selections in 'categories' (simple) or
+          'reduction' / 'increase' (mixed).
+    """
+    # Import here to avoid circular issues if this module is reused
+    import pandas as pd
+
+    name = sol.get("name", "Unnamed")
+    potential = sol.get("decarbonation_potential", 0.0)
+    target_field = sol.get("target", "EF")
+
+    if potential == 0:
+        # No effect at all if potential is zero
+        return
+
+    # --- SIMPLE SOLUTION -----------------------------------------------------
+    if sol.get("type") == "simple":
+        raw_targets = sol.get("years_targets", {}) or {}
+        start_year = sol.get("start_year", years[0])
+
+        # Interpolate implementation level for all years
+        interpolated_targets = interpolate_targets(
+            raw_targets, years, start_year, show_debug=False
+        )
+
+        # Selected categories for this solution
+        selected = set(sol.get("categories", {}).get("checked", []))
+
+        for idx, row in df.iterrows():
+            full_label = get_label_path(row)
+            if not is_subpath(full_label, selected):
+                continue
+
+            for year in years:
+                col = f"{target_field}_{year}"
+                if col not in df.columns:
+                    continue
+
+                # Final reduction factor for this year = potential × implementation level
+                reduction = potential * interpolated_targets.get(year, 0.0)
+                if reduction <= 0:
+                    continue
+
+                before_value = df.at[idx, col]
+                # If a cell is NaN or zero, skip to avoid propagating noise
+                if pd.isna(before_value) or before_value == 0:
+                    continue
+
+                df.at[idx, col] = before_value * (1 - reduction)
+
+    # --- MIXED SOLUTION ------------------------------------------------------
+    elif sol.get("type") == "mixed":
+        raw_targets = sol.get("years_targets", {}) or {}
+        start_year = sol.get("start_year", years[0])
+
+        interpolated_targets = interpolate_targets(
+            raw_targets, years, start_year, show_debug=False
+        )
+
+        # Reduction side
+        reduction_paths = set(
+            sol.get("reduction", {}).get("categories", {}).get("checked", [])
+        )
+
+        # Increase side: list of groups ({label, categories, conversion_factor})
+        increase_groups = sol.get("increase", [])
+        if isinstance(increase_groups, dict):
+            # Backward compatibility if 'increase' was stored as a dict
+            increase_groups = [increase_groups]
+        if increase_groups is None:
+            increase_groups = []
+
+        # We will first apply reductions and accumulate "capacity" by year,
+        # then redistribute this capacity across increase groups.
+        yearly_reductions = {y: 0.0 for y in years}
+
+        # --- Phase 1: apply reductions on selected rows ----------------------
+        for idx, row in df.iterrows():
+            full_label = get_label_path(row)
+            if not is_subpath(full_label, reduction_paths):
+                continue
+
+            for year in years:
+                col = f"{target_field}_{year}"
+                if col not in df.columns:
+                    continue
+
+                before_value = df.at[idx, col]
+                if pd.isna(before_value) or before_value == 0:
+                    continue
+
+                reduction = potential * interpolated_targets.get(year, 0.0)
+                if reduction <= 0:
+                    continue
+
+                delta = before_value * reduction
+                df.at[idx, col] = before_value - delta
+                yearly_reductions[year] += delta
+
+        # --- Phase 2: redistribute increased activity across increase groups --
+        # For each group, we allocate a share of the yearly_reductions scaled
+        # by the group conversion factor, and distribute it evenly on all
+        # rows that belong to the group.
+        for inc_group in increase_groups:
+            factor = inc_group.get("conversion_factor", 1.0) or 1.0
+            increase_paths = set(
+                inc_group.get("categories", {}).get("checked", [])
+            )
+
+            # Identify all rows that belong to this increase group
+            affected_rows = [
+                idx for idx, row in df.iterrows()
+                if is_subpath(get_label_path(row), increase_paths)
+            ]
+            if not affected_rows:
+                continue
+
+            for year in years:
+                col = f"{target_field}_{year}"
+                if col not in df.columns:
+                    continue
+
+                total_increase = yearly_reductions[year] * factor
+                if total_increase == 0:
+                    continue
+
+                per_row_increase = total_increase / len(affected_rows)
+                for idx in affected_rows:
+                    before_value = df.at[idx, col]
+                    if pd.isna(before_value):
+                        before_value = 0.0
+                    df.at[idx, col] = before_value + per_row_increase
+
+    # If sol["type"] is something else, we silently ignore it for now
 
 
 def build_solution_weights_table(df, years, st_session_solutions):
     """
-    Build weight tables showing how each solution contributes to each row and year.
+    Build tables of *isolated* solution impacts per row and year.
 
-    The weight for each solution = decarbonation_potential × interpolated(year_target).
-    These weights are later used for detailed emission attribution.
+    New logic (isolated impact approach)
+    ------------------------------------
+    For each solution, we do:
 
-    Compatible with multiple increase groups (list) in mixed solutions.
+        1. Start from the baseline DataFrame `df` (before any solution).
+        2. Make a copy of `df` -> `df_iso`.
+        3. Apply ONLY THIS solution to `df_iso` (using `apply_single_solution`).
+        4. For each row and year, compute the change in EF and in Value
+           between baseline and this isolated scenario.
+        5. Convert those changes into emissions impact:
+
+            - If solution target is "EF":
+                  impact = (EF_before - EF_after) * Value_before
+
+            - If solution target is "Value":
+                  impact = (Value_before - Value_after) * EF_before
+
+        6. Store this impact as the weight for that row/year/solution.
+
+    IMPORTANT
+    ---------
+    - We now keep **all impacts**, including negative ones:
+        - Positive  => avoided emissions.
+        - Negative  => additional emissions caused by the solution
+                       (e.g. when shifting activity to another line).
+    - This avoids artificially inflating / deflating the importance of a
+      mixed solution by ignoring parts where it increases emissions.
+
+    Output structure
+    ----------------
+    We keep the same structure for compatibility with the rest of the code:
+
+        ef_weights[row_index][year][solution_name]  = isolated impact
+                                                     due to EF changes only
+        val_weights[row_index][year][solution_name] = isolated impact
+                                                     due to Value changes only
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Baseline projection BEFORE applying any solution.
+    years : list[int]
+        List of years used for EF/Value/Emissions columns.
+    st_session_solutions : list[dict]
+        List of solution configurations (e.g. `st.session_state.solutions`).
+
+    Returns
+    -------
+    (ef_weights, val_weights) : (dict, dict)
+        Nested dictionaries as described above.
     """
+    import pandas as pd
+
+    # Initialize nested dicts for all rows and years
     ef_weights = {idx: {y: {} for y in years} for idx in df.index}
     val_weights = {idx: {y: {} for y in years} for idx in df.index}
 
+    # Precompute baseline EF and Value for speed and clarity
+    baseline_ef = {
+        y: df[f"EF_{y}"].copy() for y in years if f"EF_{y}" in df.columns
+    }
+    baseline_val = {
+        y: df[f"Value_{y}"].copy() for y in years if f"Value_{y}" in df.columns
+    }
+
     for sol in st_session_solutions:
-        name = sol["name"]
-        sol_type = sol["type"]
-        sol_target = sol.get("target", "")
+        name = sol.get("name", "Unnamed solution")
+        sol_target = sol.get("target", "EF")
+
+        # Skip solutions with zero potential
         potential = sol.get("decarbonation_potential", 0.0)
-        start_year = sol.get("start_year", years[0])
-        interpolated = interpolate_targets(sol.get("years_targets", {}), years, start_year)
+        if potential == 0:
+            continue
 
-        for y in years:
-            level = potential * interpolated.get(y, 0.0)
-            if level == 0:
-                continue
+        # Work on a copy of the baseline
+        df_iso = df.copy()
 
-            for idx, row in df.iterrows():
-                label = get_label_path(row)
+        # Apply ONLY this solution on df_iso
+        apply_single_solution(df_iso, years, sol)
 
-                # === SIMPLE SOLUTIONS ===
-                if sol_type == "simple":
-                    selected = set(sol.get("categories", {}).get("checked", []))
-                    if is_subpath(label, selected):
-                        if sol_target == "EF":
-                            ef_weights[idx][y][name] = level
-                        elif sol_target == "Value":
-                            val_weights[idx][y][name] = level
+        # For each row/year, compute isolated impact
+        for idx in df.index:
+            for y in years:
+                ef_col = f"EF_{y}"
+                val_col = f"Value_{y}"
 
-                # === MIXED SOLUTIONS ===
-                elif sol_type == "mixed":
-                    # Handle reduction categories
-                    red_sel = set(sol.get("reduction", {}).get("categories", {}).get("checked", []))
-                    if is_subpath(label, red_sel):
-                        if sol_target == "EF":
-                            ef_weights[idx][y][name] = level
-                        elif sol_target == "Value":
-                            val_weights[idx][y][name] = level
+                if ef_col not in df_iso.columns or val_col not in df_iso.columns:
+                    continue
 
-                    # Handle one or multiple increase groups
-                    increase_groups = sol.get("increase", [])
-                    if isinstance(increase_groups, dict):
-                        # Backward compatibility (old format)
-                        increase_groups = [increase_groups]
+                # Baseline (before)
+                ef_before = baseline_ef[y].get(idx, None)
+                val_before = baseline_val[y].get(idx, None)
 
-                    for inc_group in increase_groups:
-                        inc_sel = set(inc_group.get("categories", {}).get("checked", []))
-                        if is_subpath(label, inc_sel):
-                            if sol_target == "EF":
-                                ef_weights[idx][y][name] = level
-                            elif sol_target == "Value":
-                                val_weights[idx][y][name] = level
+                if pd.isna(ef_before) or pd.isna(val_before):
+                    continue
+
+                # After applying only this solution
+                ef_after = df_iso.at[idx, ef_col]
+                val_after = df_iso.at[idx, val_col]
+
+                # For EF-targeted solutions, we attribute impact through EF changes:
+                #   impact = (EF_before - EF_after) * Value_before
+                if sol_target == "EF":
+                    impact_ef = (ef_before - ef_after) * val_before
+
+                    # ✅ Keep impacts even if they are negative or zero:
+                    #    positive  -> avoided emissions
+                    #    negative  -> additional emissions
+                    if impact_ef != 0:
+                        ef_weights[idx][y][name] = (
+                            ef_weights[idx][y].get(name, 0.0) + impact_ef
+                        )
+
+                # For Value-targeted solutions, we attribute impact through Value changes:
+                #   impact = (Value_before - Value_after) * EF_before
+                elif sol_target == "Value":
+                    impact_val = (val_before - val_after) * ef_before
+
+                    if impact_val != 0:
+                        val_weights[idx][y][name] = (
+                            val_weights[idx][y].get(name, 0.0) + impact_val
+                        )
+
+                # If sol_target is something else, we ignore it for now.
 
     return ef_weights, val_weights
 
+def build_weights_debug_table(ef_weights, val_weights, years):
+    """
+    Build a long-format debug table of non-zero solution weights.
+
+    This function flattens the nested dictionaries produced by
+    `build_solution_weights_table` into a tabular format:
+
+        - one row per (row_index, year, field, solution)
+        - only non-zero weights are kept
+        - weights can be positive (avoided emissions) or negative
+          (additional emissions).
+
+    Parameters
+    ----------
+    ef_weights : dict
+        Nested dictionary:
+            ef_weights[row_index][year][solution_name] = weight
+        Typically represents impacts due to changes in EF.
+    val_weights : dict
+        Nested dictionary:
+            val_weights[row_index][year][solution_name] = weight
+        Typically represents impacts due to changes in Value.
+    years : list[int]
+        List of years to include in the debug table.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame with the following columns:
+            - 'Row index'
+            - 'Year'
+            - 'Field'   ('EF' or 'Value')
+            - 'Solution'
+            - 'Weight'
+        Only rows with Weight != 0 are included.
+    """
+    import pandas as pd
+
+    debug_rows = []
+
+    # --- Flatten EF weights --------------------------------------------------
+    for idx, year_dict in ef_weights.items():
+        for y in years:
+            # Safely access the dictionary for this year
+            sol_dict = year_dict.get(y, {})
+            if not sol_dict:
+                continue
+
+            for sol_name, w in sol_dict.items():
+                if w == 0 or w is None:
+                    continue
+
+                debug_rows.append({
+                    "Row index": idx,
+                    "Year": y,
+                    "Field": "EF",
+                    "Solution": sol_name,
+                    "Weight": w,
+                })
+
+    # --- Flatten Value weights ----------------------------------------------
+    for idx, year_dict in val_weights.items():
+        for y in years:
+            sol_dict = year_dict.get(y, {})
+            if not sol_dict:
+                continue
+
+            for sol_name, w in sol_dict.items():
+                if w == 0 or w is None:
+                    continue
+
+                debug_rows.append({
+                    "Row index": idx,
+                    "Year": y,
+                    "Field": "Value",
+                    "Solution": sol_name,
+                    "Weight": w,
+                })
+
+    # Build DataFrame
+    if not debug_rows:
+        return pd.DataFrame(
+            columns=["Row index", "Year", "Field", "Solution", "Weight"]
+        )
+
+    df_debug = pd.DataFrame(debug_rows)
+
+    # Sort for readability: by solution, then year, then field, then row index
+    df_debug = df_debug.sort_values(
+        by=["Solution", "Year", "Field", "Row index"]
+    ).reset_index(drop=True)
+
+    return df_debug
+
+def build_weights_summary_table(debug_df):
+    """
+    Build an aggregated summary table from the debug weights table.
+
+    Parameters
+    ----------
+    debug_df : pd.DataFrame
+        Output of `build_weights_debug_table`, with columns:
+        ['Row index', 'Year', 'Field', 'Solution', 'Weight'].
+
+    Returns
+    -------
+    pd.DataFrame
+        Aggregated table with:
+            - Solution
+            - Year
+            - Field ('EF' or 'Value')
+            - Total weight (sum of weights for this group)
+    """
+    if debug_df.empty:
+        return debug_df
+
+    summary = (
+        debug_df
+        .groupby(["Solution", "Year", "Field"], as_index=False)["Weight"]
+        .sum()
+        .rename(columns={"Weight": "Total weight"})
+        .sort_values(by=["Solution", "Year", "Field"])
+        .reset_index(drop=True)
+    )
+
+    return summary
 
 
 # =========================================================
