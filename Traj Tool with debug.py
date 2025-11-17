@@ -515,6 +515,43 @@ with tabs[4]:
             st.dataframe(projected_with_solutions, use_container_width=True)
 
             # -------------------------------
+            # Debug: weights tables
+            # -------------------------------
+            with st.expander("🧪 Debug – solution weights table", expanded=False):
+                df_debug = build_weights_debug_table(ef_weights, val_weights, years)
+
+                if df_debug.empty:
+                    st.info(
+                        "No non-zero weights found. Check your solutions configuration."
+                    )
+                else:
+                    # Optional: filter by solution for easier inspection
+                    solutions_list = sorted(df_debug["Solution"].unique())
+                    selected_solution = st.selectbox(
+                        "Filter by solution",
+                        options=["(All)"] + solutions_list,
+                        index=0,
+                    )
+
+                    if selected_solution != "(All)":
+                        df_to_show = df_debug[df_debug["Solution"] == selected_solution]
+                    else:
+                        df_to_show = df_debug
+
+                    st.markdown("### Detailed weights (non-zero only)")
+                    st.dataframe(df_to_show, use_container_width=True)
+
+                    # Optional: show an aggregated summary
+                    st.markdown("### Summary per solution / year / field")
+                    df_summary = build_weights_summary_table(df_debug)
+                    if selected_solution != "(All)":
+                        df_summary = df_summary[
+                            df_summary["Solution"] == selected_solution
+                        ]
+
+                    st.dataframe(df_summary, use_container_width=True)
+
+            # -------------------------------
             # Diagnostic table (human-readable)
             # -------------------------------
             diagnostic_df_str = diagnostic_df.applymap(
@@ -528,6 +565,219 @@ with tabs[4]:
             # -------------------------------
             st.markdown("### 🧮 Final attribution of emissions reduction by solution")
             st.dataframe(impact_df.style.format("{:.2f}"), use_container_width=True)
+
+                       # -------------------------------
+            # Debug: attribution mechanics for a single row
+            # -------------------------------
+            with st.expander(
+                "🧪 Debug – attribution mechanics for a single row", expanded=False
+            ):
+                if df_emissions_before.empty:
+                    st.info(
+                        "No data available to debug – please run the results computation first."
+                    )
+                else:
+                    # --------------------------------------------------
+                    # Initialise session_state containers (if missing)
+                    # --------------------------------------------------
+                    if "compute_debug_df" not in st.session_state:
+                        st.session_state["compute_debug_df"] = pd.DataFrame()
+                    if "compute_debug_row" not in st.session_state:
+                        st.session_state["compute_debug_row"] = None
+                    if "row_year_sol_debug_df" not in st.session_state:
+                        st.session_state["row_year_sol_debug_df"] = pd.DataFrame()
+                    if "row_year_sol_debug_meta" not in st.session_state:
+                        st.session_state["row_year_sol_debug_meta"] = {}
+
+                    # --------------------------------------------------
+                    # 1) Choose row index
+                    # --------------------------------------------------
+                    row_indices = list(df_emissions_before.index)
+                    selected_row = st.selectbox(
+                        "Select a row index to inspect",
+                        options=row_indices,
+                        help=(
+                            "Choose a single row to see all intermediate values used in the "
+                            "attribution (brut_ef, brut_val, brut_total, diagnostic weights, etc.)."
+                        ),
+                    )
+
+                    # --------------------------------------------------
+                    # 2) Button: compute debug for this row (all years)
+                    #    -> store result in session_state
+                    # --------------------------------------------------
+                    if st.button(
+                        "Run compute debug for this row",
+                        key="run_compute_debug_button",
+                    ):
+                        st.session_state["compute_debug_df"] = build_compute_debug_table(
+                            df_emissions_before,
+                            df_emissions_after,
+                            df_avoided,
+                            diagnostic_df,
+                            years,
+                            selected_row,
+                        )
+                        st.session_state["compute_debug_row"] = selected_row
+                        # Optional: reset row+year debug when row changes
+                        st.session_state["row_year_sol_debug_df"] = pd.DataFrame()
+                        st.session_state["row_year_sol_debug_meta"] = {}
+
+                    # --------------------------------------------------
+                    # 3) Display compute-debug table if available
+                    # --------------------------------------------------
+                    df_compute_debug = st.session_state.get(
+                        "compute_debug_df", pd.DataFrame()
+                    )
+
+                    if df_compute_debug.empty:
+                        st.info(
+                            "Click **'Run compute debug for this row'** to see intermediate values."
+                        )
+                    else:
+                        st.markdown(
+                            f"### Detailed intermediate values for row "
+                            f"`{st.session_state['compute_debug_row']}`"
+                        )
+
+                        float_cols = [
+                            "EF_before",
+                            "EF_after",
+                            "Value_before",
+                            "Value_after",
+                            "brut_component",
+                            "brut_total",
+                            "delta_avoided",
+                            "Component_ratio",
+                        ]
+                        styled = df_compute_debug.copy()
+                        for col in float_cols:
+                            if col in styled.columns:
+                                styled[col] = styled[col].astype(float)
+
+                        st.dataframe(
+                            df_compute_debug.style.format(
+                                {
+                                    "EF_before": "{:.6f}",
+                                    "EF_after": "{:.6f}",
+                                    "Value_before": "{:.6f}",
+                                    "Value_after": "{:.6f}",
+                                    "brut_component": "{:.6f}",
+                                    "brut_total": "{:.6f}",
+                                    "delta_avoided": "{:.6f}",
+                                    "Component_ratio": "{:.6f}",
+                                }
+                            ),
+                            use_container_width=True,
+                        )
+
+                        st.caption(
+                            "Tip: look for rows where `Flag_small_total` is True – this means "
+                            "that EF and Value components almost cancel each other, which can "
+                            "make the ratios and the attribution very sensitive."
+                        )
+
+                    # --------------------------------------------------
+                    # 4) Per-solution breakdown for a specific year
+                    #    (uses currently selected row)
+                    # --------------------------------------------------
+                    st.markdown(
+                        "### Per-solution breakdown for a specific year (same row)"
+                    )
+
+                    year_for_solution_debug = st.selectbox(
+                        "Select a year for per-solution attribution",
+                        options=years,
+                        key="year_for_solution_debug",
+                    )
+
+                    if st.button(
+                        "Run per-solution debug for this row/year",
+                        key="run_row_year_solution_debug_button",
+                    ):
+                        df_sol_debug, meta = build_row_year_solution_debug(
+                            df_emissions_before,
+                            df_emissions_after,
+                            df_avoided,
+                            diagnostic_df,
+                            selected_row,
+                            year_for_solution_debug,
+                        )
+                        st.session_state["row_year_sol_debug_df"] = df_sol_debug
+                        st.session_state["row_year_sol_debug_meta"] = meta
+
+                    # --------------------------------------------------
+                    # 5) Display per-solution debug if available
+                    # --------------------------------------------------
+                    df_sol_debug = st.session_state.get(
+                        "row_year_sol_debug_df", pd.DataFrame()
+                    )
+                    meta = st.session_state.get("row_year_sol_debug_meta", {})
+
+                    if meta and not df_sol_debug.empty:
+                        st.markdown("#### Context for this row and year")
+
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("EF before", f"{meta['EF_before']:.6f}")
+                            st.metric("EF after", f"{meta['EF_after']:.6f}")
+                        with col2:
+                            st.metric("Value before", f"{meta['Value_before']:.3f}")
+                            st.metric("Value after", f"{meta['Value_after']:.3f}")
+                        with col3:
+                            st.metric(
+                                "Delta avoided (tonnes)",
+                                f"{meta['delta_avoided']:.6f}",
+                            )
+                            st.metric("brut_total", f"{meta['brut_total']:.6f}")
+
+                        st.caption(
+                            f"brut_ef = {meta['brut_ef']:.6f}, "
+                            f"brut_val = {meta['brut_val']:.6f}, "
+                            f"ratios: EF = {meta['ratio_ef']:.3f}, "
+                            f"Value = {meta['ratio_val']:.3f}."
+                        )
+                        if meta["flag_small_total"]:
+                            st.warning(
+                                "⚠️ brut_total is very close to zero for this row/year – "
+                                "EF and Value effects almost cancel each other. "
+                                "Attribution becomes very sensitive to diagnostic weights."
+                            )
+
+                        st.markdown(
+                            "#### Attributed impact per solution (this row & year only)"
+                        )
+                        st.dataframe(
+                            df_sol_debug.style.format(
+                                {
+                                    "EF_weight_raw": "{:.3f}",
+                                    "EF_weight_norm": "{:.3f}",
+                                    "Value_weight_raw": "{:.3f}",
+                                    "Value_weight_norm": "{:.3f}",
+                                    "Impact_from_EF": "{:.6f}",
+                                    "Impact_from_Value": "{:.6f}",
+                                    "Total_impact": "{:.6f}",
+                                }
+                            ),
+                            use_container_width=True,
+                        )
+
+                        st.caption(
+                            "Interpretation:\n"
+                            "- `*_weight_raw` are the raw diagnostic weights in [0,1] for EF and Value.\n"
+                            "- `*_weight_norm` are those weights normalised so that they sum to 1 over all "
+                            "solutions for EF (respectively Value).\n"
+                            "- `Impact_from_EF` and `Impact_from_Value` are the parts of the real avoided "
+                            "emissions for this row/year that are attributed to each solution via EF and "
+                            "Value.\n"
+                            "- `Total_impact` is the sum of both; if you sum this column over all solutions, "
+                            "you get back the portion of `delta_avoided` attributed to this row/year."
+                        )
+                    else:
+                        st.info(
+                            "Click **'Run per-solution debug for this row/year'** to see the "
+                            "detailed attribution per solution."
+                        )
 
 
             # -------------------------------

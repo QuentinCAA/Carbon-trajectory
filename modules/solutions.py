@@ -963,12 +963,12 @@ def interpolate_targets(year_targets, all_years, start_year, show_debug=False):
         df = pd.DataFrame.from_dict(interpolated, orient="index", columns=["Effect level (0–1)"])
         st.dataframe(df)
 
-        """fig, ax = plt.subplots()
+        fig, ax = plt.subplots()
         ax.plot(df.index, df["Effect level (0–1)"], marker="o")
         ax.set_title("Interpolation curve")
         ax.set_xlabel("Year")
         ax.set_ylabel("Proportion (0–1)")
-        st.pyplot(fig)"""
+        st.pyplot(fig)
 
     return interpolated
 
@@ -1027,11 +1027,96 @@ def build_diagnostic_weights_table(df, years, ef_weights, val_weights):
         index=[r[0] for r in diagnostic_rows]
     )
 
-
 def compute_solution_impact_from_diagnostic(df_before, df_after, df_avoided, diagnostic_df, years):
     """
     Attribute real avoided emissions to each solution using diagnostic weights.
+
+    This version stabilises the EF / Value shares when the sum of weights is
+    very small (asymptote problem: positive and negative weights almost cancel).
+
+    Heuristic:
+        - We compute share_s = w_s / sum(w).
+        - If any |share_s| > MAX_ABS_SHARE (default 3),
+          we *double* the smallest |w_s| and recompute.
+        - This pushes the denominator away from 0 without changing the
+          distribution too much (we only touch the smallest weight).
+
+    If at least one stabilisation is applied, a warning message is displayed
+    in the Streamlit UI to inform the user that a numerical adjustment has
+    been used (no exact mathematical solution for this case).
     """
+    import math
+    import pandas as pd
+
+    MAX_ABS_SHARE = 3.0
+    MAX_ITER = 50
+
+    # This list will collect contexts where stabilisation was actually applied
+    stabilisation_log = []
+
+    def stabilise_shares(weights_dict, context_label, max_abs_share=MAX_ABS_SHARE, max_iter=MAX_ITER):
+        """
+        Given a dict {solution: weight}, return a dict {solution: share}
+        such that:
+            - share_s ≈ weight_s / sum(weights)
+            - but no |share_s| is larger than max_abs_share
+              (unless we hit max_iter or a degenerate case).
+
+        If we cannot normalise (all zero / sum == 0), returns zeros.
+
+        If stabilisation is needed (at least one modification of weights),
+        the context_label is appended to the outer stabilisation_log.
+        """
+        # Work on a copy so we do not mutate the original dictionary
+        weights = dict(weights_dict)
+
+        # Edge case: empty dict
+        if not weights:
+            return {}
+
+        modified = False  # track whether we actually changed the weights
+
+        for _ in range(max_iter):
+            total = sum(weights.values())
+            if math.isclose(total, 0.0, abs_tol=1e-15):
+                # Degenerate case: cannot normalise, return all zeros
+                return {s: 0.0 for s in weights}
+
+            shares = {s: w / total for s, w in weights.items()}
+            max_share = max(abs(sh) for sh in shares.values())
+
+            # If all shares are within the acceptable range, we are done
+            if max_share <= max_abs_share:
+                # If we had to modify weights to reach this state,
+                # log the context for user information later.
+                if modified and context_label is not None:
+                    stabilisation_log.append(context_label)
+                return shares
+
+            # Otherwise, we push the denominator away from zero by
+            # doubling the smallest |w| (in absolute value).
+            # This should change the distribution minimally.
+            non_zero_weights = [(s, w) for s, w in weights.items() if w != 0]
+            if not non_zero_weights:
+                # All weights are zero -> cannot fix, return zeros
+                return {s: 0.0 for s in weights}
+
+            # Solution with the smallest absolute weight
+            sol_min, w_min = min(non_zero_weights, key=lambda item: abs(item[1]))
+            weights[sol_min] = w_min * 2
+            modified = True
+
+        # If we exit the loop without satisfying the condition, just
+        # return the last computed shares and log the context if modified.
+        total = sum(weights.values())
+        if math.isclose(total, 0.0, abs_tol=1e-15):
+            return {s: 0.0 for s in weights}
+
+        if modified and context_label is not None:
+            stabilisation_log.append(context_label)
+
+        return {s: w / total for s, w in weights.items()}
+
     impact_by_solution = {}
 
     for idx in df_before.index:
@@ -1040,6 +1125,7 @@ def compute_solution_impact_from_diagnostic(df_before, df_after, df_avoided, dia
             val_col = f"Value_{year}"
             em_col = f"Emissions_{year}"
 
+            # Retrieve before/after values
             ef_b = df_before.at[idx, ef_col]
             ef_a = df_after.at[idx, ef_col]
             val_b = df_before.at[idx, val_col]
@@ -1047,40 +1133,449 @@ def compute_solution_impact_from_diagnostic(df_before, df_after, df_avoided, dia
 
             delta = df_avoided.at[idx, em_col]
             if delta == 0:
+                # Nothing to attribute for this row/year
                 continue
 
+            # Retrieve diagnostic weights (lists of (solution, percentage))
             key_ef = f"{idx} - EF"
             key_val = f"{idx} - Value"
             ef_weights = diagnostic_df.loc[key_ef, year] if key_ef in diagnostic_df.index else []
             val_weights = diagnostic_df.loc[key_val, year] if key_val in diagnostic_df.index else []
 
+            # Convert to dictionaries of raw weights in [0,1]
             ef_dict = {s: pct / 100 for s, pct in ef_weights} if isinstance(ef_weights, list) else {}
             val_dict = {s: pct / 100 for s, pct in val_weights} if isinstance(val_weights, list) else {}
 
+            # Compute brut effects
             brut_ef = (ef_b - ef_a) * val_b
             brut_val = (val_b - val_a) * ef_b
             brut_total = brut_ef + brut_val
 
-            if brut_total == 0:
+            if math.isclose(brut_total, 0.0, abs_tol=1e-15):
+                # EF and Value effects cancel each other -> no stable attribution
                 continue
 
+            # -------------------------
             # EF-based attribution
-            total_ef_weight = sum(ef_dict.values())
-            for sol, w in ef_dict.items():
-                share = w / total_ef_weight if total_ef_weight else 0
+            # -------------------------
+            ef_shares = stabilise_shares(
+                ef_dict,
+                context_label=f"Row {idx}, year {year}, field EF",
+            )
+            for sol, share in ef_shares.items():
+                # share already includes the normalisation; we just apply
+                # the fraction of delta that comes from EF
                 real_impact = share * (brut_ef / brut_total * delta)
                 impact_by_solution.setdefault(sol, {}).setdefault(year, 0.0)
                 impact_by_solution[sol][year] += real_impact
 
+            # -------------------------
             # Value-based attribution
-            total_val_weight = sum(val_dict.values())
-            for sol, w in val_dict.items():
-                share = w / total_val_weight if total_val_weight else 0
+            # -------------------------
+            val_shares = stabilise_shares(
+                val_dict,
+                context_label=f"Row {idx}, year {year}, field Value",
+            )
+            for sol, share in val_shares.items():
                 real_impact = share * (brut_val / brut_total * delta)
                 impact_by_solution.setdefault(sol, {}).setdefault(year, 0.0)
                 impact_by_solution[sol][year] += real_impact
 
+    # -------------------------------------------
+    # If stabilisation has been used, warn user
+    # -------------------------------------------
+    if stabilisation_log:
+        try:
+            import streamlit as st
+
+            st.warning(
+                "⚠️ Numerical stabilisation was applied for some rows during the "
+                "attribution of avoided emissions to solutions."
+            )
+            st.caption(
+                "Because some diagnostic weights were very close to an asymptotic case "
+                "(positive and negative weights almost cancelling out), the attribution "
+                "to individual solutions does not have a unique, exact mathematical "
+                "solution. A small numerical adjustment was applied to the smallest "
+                "weights to move the system away from this asymptote and obtain a "
+                "stable allocation."
+            )
+            # Optional: show how many cases were adjusted (without flooding details)
+            st.caption(
+                f"Stabilisation was triggered in {len(stabilisation_log)} row/year/field "
+                "cases. You can inspect critical rows with the debug tools in the Results tab."
+            )
+        except Exception:
+            # If Streamlit is not available (e.g. running in a pure Python context),
+            # just ignore the UI warning.
+            pass
+
+    # Build final DataFrame
     final = pd.DataFrame.from_dict(impact_by_solution, orient="index").fillna(0.0)
     final = final[[y for y in years if y in final.columns]]
     final.index.name = "Solution"
     return final
+
+
+
+def build_compute_debug_table(df_before, df_after, df_avoided, diagnostic_df, years, row_index):
+    """
+    Build a debug table showing how avoided emissions are split between EF and Value
+    for a single row across all years.
+
+    This function reproduces the internal calculations of
+    `compute_solution_impact_from_diagnostic` but only for one row, and
+    structures the intermediate values in a readable table.
+
+    One row in the output corresponds to:
+        (row_index, year, field) where field ∈ {'EF', 'Value'}
+
+    Columns include:
+        - Row index
+        - Year
+        - Field ('EF' or 'Value')
+        - EF_before / EF_after
+        - Value_before / Value_after
+        - brut_component  (brut_ef or brut_val)
+        - brut_total      (brut_ef + brut_val)
+        - delta_avoided   (df_avoided Emissions_before - after)
+        - Weights_dict    (diagnostic weights for that field & year)
+        - Weights_sum
+        - Component_ratio (brut_component / brut_total)
+        - Flag_small_total (True if brut_total is close to 0)
+
+    Parameters
+    ----------
+    df_before : pd.DataFrame
+        DataFrame of emissions *before* solutions (EF_x, Value_x, Emissions_x).
+    df_after : pd.DataFrame
+        DataFrame of emissions *after* solutions.
+    df_avoided : pd.DataFrame
+        DataFrame of avoided emissions per line (Emissions_before - Emissions_after).
+    diagnostic_df : pd.DataFrame
+        Diagnostic table where each cell is typically a list of (solution, pct) tuples.
+    years : list[int]
+        List of years to inspect.
+    row_index : hashable
+        The index of the row to debug (must be present in df_before / df_after / df_avoided).
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format debug table for the selected row.
+    """
+    import math
+    import pandas as pd
+
+    debug_rows = []
+
+    if row_index not in df_before.index:
+        # Return empty table with correct structure if index is invalid
+        return pd.DataFrame(
+            columns=[
+                "Row index", "Year", "Field",
+                "EF_before", "EF_after",
+                "Value_before", "Value_after",
+                "brut_component", "brut_total",
+                "delta_avoided",
+                "Weights_dict", "Weights_sum",
+                "Component_ratio", "Flag_small_total",
+            ]
+        )
+
+    for year in years:
+        ef_col = f"EF_{year}"
+        val_col = f"Value_{year}"
+        em_col = f"Emissions_{year}"
+
+        # Skip if some columns are missing
+        if ef_col not in df_before.columns or val_col not in df_before.columns:
+            continue
+        if em_col not in df_avoided.columns:
+            continue
+
+        ef_b = df_before.at[row_index, ef_col]
+        ef_a = df_after.at[row_index, ef_col]
+        val_b = df_before.at[row_index, val_col]
+        val_a = df_after.at[row_index, val_col]
+
+        delta = df_avoided.at[row_index, em_col]
+
+        # Skip if absolutely nothing happened for this year
+        if (ef_b == ef_a) and (val_b == val_a) and (delta == 0):
+            continue
+
+        # --- Retrieve diagnostic weights for this row/year -------------------
+        key_ef = f"{row_index} - EF"
+        key_val = f"{row_index} - Value"
+
+        # Defensive access to diagnostic_df
+        if (key_ef in diagnostic_df.index) and (year in diagnostic_df.columns):
+            ef_weights_cell = diagnostic_df.loc[key_ef, year]
+        else:
+            ef_weights_cell = []
+
+        if (key_val in diagnostic_df.index) and (year in diagnostic_df.columns):
+            val_weights_cell = diagnostic_df.loc[key_val, year]
+        else:
+            val_weights_cell = []
+
+        # Convert (solution, pct) list to dict of weights in [0,1]
+        ef_dict = (
+            {s: pct / 100 for s, pct in ef_weights_cell}
+            if isinstance(ef_weights_cell, list) else {}
+        )
+        val_dict = (
+            {s: pct / 100 for s, pct in val_weights_cell}
+            if isinstance(val_weights_cell, list) else {}
+        )
+
+        # --- Compute brut effects -------------------------------------------
+        brut_ef = (ef_b - ef_a) * val_b
+        brut_val = (val_b - val_a) * ef_b
+        brut_total = brut_ef + brut_val
+
+        # Check if total is almost zero (cancelling positive & negative effects)
+        flag_small_total = math.isclose(brut_total, 0.0, abs_tol=1e-12)
+
+        # EF component row
+        component_ratio_ef = None
+        if not flag_small_total:
+            component_ratio_ef = brut_ef / brut_total if brut_total != 0 else None
+
+        debug_rows.append({
+            "Row index": row_index,
+            "Year": year,
+            "Field": "EF",
+            "EF_before": ef_b,
+            "EF_after": ef_a,
+            "Value_before": val_b,
+            "Value_after": val_a,
+            "brut_component": brut_ef,
+            "brut_total": brut_total,
+            "delta_avoided": delta,
+            "Weights_dict": ef_dict,
+            "Weights_sum": sum(ef_dict.values()),
+            "Component_ratio": component_ratio_ef,
+            "Flag_small_total": flag_small_total,
+        })
+
+        # Value component row
+        component_ratio_val = None
+        if not flag_small_total:
+            component_ratio_val = brut_val / brut_total if brut_total != 0 else None
+
+        debug_rows.append({
+            "Row index": row_index,
+            "Year": year,
+            "Field": "Value",
+            "EF_before": ef_b,
+            "EF_after": ef_a,
+            "Value_before": val_b,
+            "Value_after": val_a,
+            "brut_component": brut_val,
+            "brut_total": brut_total,
+            "delta_avoided": delta,
+            "Weights_dict": val_dict,
+            "Weights_sum": sum(val_dict.values()),
+            "Component_ratio": component_ratio_val,
+            "Flag_small_total": flag_small_total,
+        })
+
+    if not debug_rows:
+        return pd.DataFrame(
+            columns=[
+                "Row index", "Year", "Field",
+                "EF_before", "EF_after",
+                "Value_before", "Value_after",
+                "brut_component", "brut_total",
+                "delta_avoided",
+                "Weights_dict", "Weights_sum",
+                "Component_ratio", "Flag_small_total",
+            ]
+        )
+
+    df_debug = pd.DataFrame(debug_rows)
+
+    # Sort for readability
+    df_debug = df_debug.sort_values(
+        by=["Year", "Field"]
+    ).reset_index(drop=True)
+
+    return df_debug
+
+def build_row_year_solution_debug(df_before, df_after, df_avoided, diagnostic_df, row_index, year):
+    """
+    Build a per-solution attribution breakdown for a single row and a single year.
+
+    This function mirrors the logic of `compute_solution_impact_from_diagnostic` but
+    only for one (row_index, year) pair. It splits the real avoided emissions (delta)
+    into:
+        - a part due to EF change,
+        - a part due to Value change,
+    and then allocates each part between solutions using the diagnostic weights.
+
+    Parameters
+    ----------
+    df_before : pd.DataFrame
+        DataFrame of emissions *before* solutions (EF_year, Value_year, Emissions_year).
+    df_after : pd.DataFrame
+        DataFrame of emissions *after* solutions.
+    df_avoided : pd.DataFrame
+        DataFrame of avoided emissions (Emissions_before - Emissions_after).
+    diagnostic_df : pd.DataFrame
+        Diagnostic table where each cell is typically a list of (solution_name, percentage).
+    row_index : hashable
+        Index of the row to inspect (must exist in df_before / df_after / df_avoided).
+    year : int
+        Year to inspect.
+
+    Returns
+    -------
+    tuple (df_solutions, meta)
+        df_solutions : pd.DataFrame
+            One row per solution appearing in EF and/or Value weights for this row/year.
+            Columns:
+                - Solution
+                - EF_weight_raw        (sum of raw EF weights in [0,1])
+                - EF_weight_norm       (normalised EF weight, sum over solutions = 1 if any EF weights)
+                - Value_weight_raw     (sum of raw Value weights in [0,1])
+                - Value_weight_norm    (normalised Value weight, sum over solutions = 1 if any Value weights)
+                - Impact_from_EF       (tonnes attributed via EF part)
+                - Impact_from_Value    (tonnes attributed via Value part)
+                - Total_impact         (Impact_from_EF + Impact_from_Value)
+
+        meta : dict
+            Dictionary with scalar information for this row/year:
+                - 'EF_before', 'EF_after'
+                - 'Value_before', 'Value_after'
+                - 'delta_avoided'
+                - 'brut_ef', 'brut_val', 'brut_total'
+                - 'flag_small_total' (True if brut_total ~ 0)
+    """
+    import math
+    import pandas as pd
+
+    ef_col = f"EF_{year}"
+    val_col = f"Value_{year}"
+    em_col = f"Emissions_{year}"
+
+    # Basic safety checks
+    if row_index not in df_before.index:
+        return pd.DataFrame(columns=[
+            "Solution",
+            "EF_weight_raw", "EF_weight_norm",
+            "Value_weight_raw", "Value_weight_norm",
+            "Impact_from_EF", "Impact_from_Value", "Total_impact",
+        ]), {}
+
+    if (ef_col not in df_before.columns or
+        val_col not in df_before.columns or
+        em_col not in df_avoided.columns):
+        return pd.DataFrame(columns=[
+            "Solution",
+            "EF_weight_raw", "EF_weight_norm",
+            "Value_weight_raw", "Value_weight_norm",
+            "Impact_from_EF", "Impact_from_Value", "Total_impact",
+        ]), {}
+
+    # --- Retrieve before / after values --------------------------------------
+    ef_b = df_before.at[row_index, ef_col]
+    ef_a = df_after.at[row_index, ef_col]
+    val_b = df_before.at[row_index, val_col]
+    val_a = df_after.at[row_index, val_col]
+    delta = df_avoided.at[row_index, em_col]
+
+    # --- Retrieve diagnostic weights for this row/year -----------------------
+    key_ef = f"{row_index} - EF"
+    key_val = f"{row_index} - Value"
+
+    if (key_ef in diagnostic_df.index) and (year in diagnostic_df.columns):
+        ef_weights_cell = diagnostic_df.loc[key_ef, year]
+    else:
+        ef_weights_cell = []
+
+    if (key_val in diagnostic_df.index) and (year in diagnostic_df.columns):
+        val_weights_cell = diagnostic_df.loc[key_val, year]
+    else:
+        val_weights_cell = []
+
+    # Convert list of (solution, pct) into dict of raw weights in [0,1]
+    ef_dict = (
+        {s: pct / 100 for s, pct in ef_weights_cell}
+        if isinstance(ef_weights_cell, list) else {}
+    )
+    val_dict = (
+        {s: pct / 100 for s, pct in val_weights_cell}
+        if isinstance(val_weights_cell, list) else {}
+    )
+
+    # --- Compute brut effects (same as in the main attribution function) -----
+    brut_ef = (ef_b - ef_a) * val_b
+    brut_val = (val_b - val_a) * ef_b
+    brut_total = brut_ef + brut_val
+
+    flag_small_total = math.isclose(brut_total, 0.0, abs_tol=1e-12)
+
+    # Ratios: share of total effect coming from EF vs Value
+    if flag_small_total or brut_total == 0:
+        ratio_ef = 0.0
+        ratio_val = 0.0
+    else:
+        ratio_ef = brut_ef / brut_total
+        ratio_val = brut_val / brut_total
+
+    # --- Normalise weights for EF and Value ----------------------------------
+    sum_ef = sum(ef_dict.values())
+    sum_val = sum(val_dict.values())
+
+    ef_norm = {s: (w / sum_ef) if sum_ef else 0.0 for s, w in ef_dict.items()}
+    val_norm = {s: (w / sum_val) if sum_val else 0.0 for s, w in val_dict.items()}
+
+    # Union of all solutions appearing in EF and/or Value weights
+    all_solutions = set(ef_dict.keys()) | set(val_dict.keys())
+
+    rows = []
+    for sol in sorted(all_solutions):
+        w_ef_raw = ef_dict.get(sol, 0.0)
+        w_val_raw = val_dict.get(sol, 0.0)
+        w_ef_norm = ef_norm.get(sol, 0.0)
+        w_val_norm = val_norm.get(sol, 0.0)
+
+        # Effective impact attributed to this solution
+        impact_from_ef = delta * ratio_ef * w_ef_norm
+        impact_from_val = delta * ratio_val * w_val_norm
+        total_impact = impact_from_ef + impact_from_val
+
+        rows.append({
+            "Solution": sol,
+            "EF_weight_raw": w_ef_raw,
+            "EF_weight_norm": w_ef_norm,
+            "Value_weight_raw": w_val_raw,
+            "Value_weight_norm": w_val_norm,
+            "Impact_from_EF": impact_from_ef,
+            "Impact_from_Value": impact_from_val,
+            "Total_impact": total_impact,
+        })
+
+    df_solutions = pd.DataFrame(rows).sort_values(
+        by="Total_impact", ascending=False
+    ).reset_index(drop=True)
+
+    meta = {
+        "EF_before": ef_b,
+        "EF_after": ef_a,
+        "Value_before": val_b,
+        "Value_after": val_a,
+        "delta_avoided": delta,
+        "brut_ef": brut_ef,
+        "brut_val": brut_val,
+        "brut_total": brut_total,
+        "flag_small_total": flag_small_total,
+        "ratio_ef": ratio_ef,
+        "ratio_val": ratio_val,
+        "sum_ef_weights": sum_ef,
+        "sum_val_weights": sum_val,
+    }
+
+    return df_solutions, meta

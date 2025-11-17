@@ -10,6 +10,65 @@ import re
 import hashlib
 import pandas as pd
 
+def smooth_time_series(x, y, points_per_year: int = 10):
+    """
+    Smooth a time series defined on a yearly grid, for nicer visual curves.
+
+    This function **does not change your underlying data**, it only generates
+    a denser x-grid and interpolated y-values for plotting purposes.
+
+    - It tries to use a cubic spline (via SciPy) if available.
+    - If SciPy is not installed, it falls back to simple linear interpolation.
+    - For fewer than 3 points, it always uses linear interpolation.
+
+    Parameters
+    ----------
+    x : array-like
+        Original x-values (e.g. years as ints).
+    y : array-like
+        Original y-values.
+    points_per_year : int, optional
+        Number of points to generate between each pair of years. Higher
+        values give smoother curves but slightly heavier rendering.
+
+    Returns
+    -------
+    x_smooth : np.ndarray
+        Dense x-grid for plotting.
+    y_smooth : np.ndarray
+        Interpolated y-values on the dense grid.
+    """
+    x = np.array(x, dtype=float)
+    y = np.array(y, dtype=float)
+
+    # If we have fewer than 2 points, nothing to smooth
+    if len(x) < 2:
+        return x, y
+
+    # Build a denser grid between min and max year
+    x_min, x_max = float(x.min()), float(x.max())
+    n_points = int((x_max - x_min) * points_per_year) + 1
+    if n_points < len(x):
+        n_points = len(x)
+
+    x_smooth = np.linspace(x_min, x_max, n_points)
+
+    # For 2 points, or if SciPy is missing, use linear interpolation
+    if len(x) < 3:
+        y_smooth = np.interp(x_smooth, x, y)
+        return x_smooth, y_smooth
+
+    # Try cubic spline with SciPy if available
+    try:
+        from scipy.interpolate import make_interp_spline
+
+        spline = make_interp_spline(x, y, k=3)
+        y_smooth = spline(x_smooth)
+    except Exception:
+        # Fallback: simple linear interpolation
+        y_smooth = np.interp(x_smooth, x, y)
+
+    return x_smooth, y_smooth
 
 # ----------------------------------------
 # Helper for safe Streamlit keys
@@ -195,6 +254,9 @@ def plot_cumulative_emissions_reduction(
     - Emissions without action (black line)
     - Emissions trajectory with actions (red line)
     - Stacked solution reductions between both
+
+    Curves are smoothed for visual purposes using interpolation between years,
+    without changing the underlying data or numerical results.
     """
 
     import matplotlib.pyplot as plt
@@ -208,12 +270,15 @@ def plot_cumulative_emissions_reduction(
 
     # 2️⃣ Compute baseline cumulative emissions
     emissions_without_action = emissions_before_df.sum(axis=0)
-    emissions_without_action.index = emissions_without_action.index.str.extract(r"Emissions_(\d+)", expand=False).astype(int)
+    emissions_without_action.index = (
+        emissions_without_action.index
+        .str.extract(r"Emissions_(\d+)", expand=False)
+        .astype(int)
+    )
     emissions_cumulative = emissions_without_action.cumsum()
 
     # 3️⃣ Prepare reductions
     reductions_by_solution_df = reductions_by_solution_df.copy()
-    # Convert only numeric columns to int
     reductions_by_solution_df.columns = [
         int(c) if str(c).isdigit() else c for c in reductions_by_solution_df.columns
     ]
@@ -224,7 +289,7 @@ def plot_cumulative_emissions_reduction(
             [s for s in st.session_state.solution_order if s in reductions_by_solution_df.index]
         ]
 
-    # Legend labels with %
+    # Legend labels with % if available
     if "Share (%)" in reductions_by_solution_df.columns:
         legend_labels = {
             name: f"{name} ({reductions_by_solution_df.loc[name, 'Share (%)']}%)"
@@ -241,20 +306,36 @@ def plot_cumulative_emissions_reduction(
     # 4️⃣ Common year range (filter only numeric years)
     years_emissions = emissions_cumulative.index
     years_reductions = reductions_cumulative.index
-    years = sorted([int(y) for y in set(years_emissions).union(years_reductions) if str(y).isdigit()])
+    years = sorted(
+        [int(y) for y in set(years_emissions).union(years_reductions) if str(y).isdigit()]
+    )
 
     reductions_cumulative = reductions_cumulative.reindex(years, method="ffill").fillna(0)
     emissions_cumulative = emissions_cumulative.reindex(years, method="ffill").fillna(0)
 
-    # 5️⃣ Compute trajectory
-    total_reduction = reductions_cumulative.sum(axis=1)
-    trajectory = emissions_cumulative - total_reduction
+    # 5️⃣ Build smoothed series on a dense grid
+    years_array = np.array(years, dtype=float)
 
-    # 6️⃣ Build stacked bands
-    bands = []
-    bottom = trajectory.copy()
+    # Smooth baseline cumulative emissions
+    x_smooth, emissions_cumulative_s = smooth_time_series(
+        years_array, emissions_cumulative.values, points_per_year=10
+    )
+
+    # Smooth each solution's cumulative reduction and recompute the trajectory on the smooth grid
+    smoothed_reductions = {}
     for col in reductions_cumulative.columns:
-        top = bottom + reductions_cumulative[col]
+        _, y_s = smooth_time_series(years_array, reductions_cumulative[col].values, points_per_year=10)
+        smoothed_reductions[col] = y_s
+
+    reductions_cumulative_s_df = pd.DataFrame(smoothed_reductions, index=x_smooth)
+    total_reduction_s = reductions_cumulative_s_df.sum(axis=1)
+    trajectory_s = emissions_cumulative_s - total_reduction_s
+
+    # 6️⃣ Build stacked bands from smoothed data
+    bands = []
+    bottom = trajectory_s.copy()
+    for col in reductions_cumulative_s_df.columns:
+        top = bottom + reductions_cumulative_s_df[col].values
         bands.append((col, bottom.copy(), top.copy()))
         bottom = top
 
@@ -262,10 +343,18 @@ def plot_cumulative_emissions_reduction(
     fig, ax = plt.subplots(figsize=(14, 8))
     for col, y_bottom, y_top in bands:
         color = solution_colors[col] if solution_colors and col in solution_colors else None
-        ax.fill_between(years, y_bottom, y_top, label=legend_labels.get(col, col), color=color, alpha=0.8)
+        ax.fill_between(
+            x_smooth,
+            y_bottom,
+            y_top,
+            label=legend_labels.get(col, col),
+            color=color,
+            alpha=0.8
+        )
 
-    ax.plot(emissions_cumulative.index, emissions_cumulative.values, color="black", linewidth=2, label="Emissions without action")
-    ax.plot(trajectory.index, trajectory.values, color="red", linewidth=2, label="Trajectory")
+    # Baseline and trajectory (smoothed)
+    ax.plot(x_smooth, emissions_cumulative_s, color="black", linewidth=2, label="Emissions without action")
+    ax.plot(x_smooth, trajectory_s, color="red", linewidth=2, label="Trajectory")
 
     # Style
     ax.set_title("Cumulative CO₂e Emissions with and without Actions", fontsize=16, fontweight="bold")
@@ -278,12 +367,13 @@ def plot_cumulative_emissions_reduction(
     ax.set_facecolor("#FAFAFA")
     ax.legend(title="Solutions", loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=10, title_fontsize=12)
 
-    # Percentage annotation
-    if show_percentage_annotation:
+    # Percentage annotation (computed on original yearly data so numbers stay exact)
+    if show_percentage_annotation and len(years) > 0:
         final_year = years[-1]
         without = emissions_cumulative.loc[final_year]
-        with_action = trajectory.loc[final_year]
-        percent_reduction = 100 * (1 - with_action / without)
+        with_action = (emissions_cumulative - reductions_cumulative.sum(axis=1)).loc[final_year]
+        percent_reduction = 100 * (1 - with_action / without) if without != 0 else 0
+
         fig.text(
             0.88, 0.52,
             f"{percent_reduction:.0f}%\nreduction\nin {final_year}",
@@ -301,6 +391,7 @@ def plot_cumulative_emissions_reduction(
 
 
 
+
 def plot_annual_emissions_reduction(
     emissions_before_df: pd.DataFrame,
     reductions_by_solution_df: pd.DataFrame,
@@ -309,20 +400,29 @@ def plot_annual_emissions_reduction(
 ):
     """
     Plot annual CO₂e emissions with and without actions.
+
+    Curves are smoothed for visual purposes using interpolation between years,
+    without changing the underlying data or numerical results.
     """
 
     import matplotlib.pyplot as plt
     import io
 
+    # 1️⃣ Prepare annual emissions
     emissions_before_df = emissions_before_df.copy()
     emissions_before_df = emissions_before_df[
         [c for c in emissions_before_df.columns if c.startswith("Emissions_")]
     ].applymap(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
 
     emissions_without_action = emissions_before_df.sum(axis=0)
-    emissions_without_action.index = emissions_without_action.index.str.extract(r"Emissions_(\d+)", expand=False).astype(int)
+    emissions_without_action.index = (
+        emissions_without_action.index
+        .str.extract(r"Emissions_(\d+)", expand=False)
+        .astype(int)
+    )
     emissions_by_year = emissions_without_action.sort_index()
 
+    # 2️⃣ Prepare reductions
     reductions_by_solution_df = reductions_by_solution_df.copy()
     reductions_by_solution_df.columns = [
         int(c) if str(c).isdigit() else c for c in reductions_by_solution_df.columns
@@ -345,27 +445,56 @@ def plot_annual_emissions_reduction(
         [c for c in reductions_by_solution_df.columns if isinstance(c, int)]
     ].T.sort_index()
 
-    years = sorted([int(y) for y in set(emissions_by_year.index).union(reductions_by_year.index) if str(y).isdigit()])
-    reductions_by_year = reductions_by_year.reindex(years, method="ffill").fillna(0)
+    # 3️⃣ Common year range
+    years = sorted(
+        [int(y) for y in set(emissions_by_year.index).union(reductions_by_year.index) if str(y).isdigit()]
+    )
     emissions_by_year = emissions_by_year.reindex(years, method="ffill").fillna(0)
+    reductions_by_year = reductions_by_year.reindex(years, method="ffill").fillna(0)
 
     total_reduction = reductions_by_year.sum(axis=1)
     trajectory = emissions_by_year - total_reduction
 
-    bands = []
-    bottom = trajectory.copy()
+    years_array = np.array(years, dtype=float)
+
+    # 4️⃣ Smooth baseline and trajectory for plotting
+    x_smooth, emissions_s = smooth_time_series(
+        years_array, emissions_by_year.values, points_per_year=10
+    )
+    _, trajectory_s = smooth_time_series(
+        years_array, trajectory.values, points_per_year=10
+    )
+
+    # 5️⃣ Smooth each solution's annual reduction and rebuild stacked bands
+    smoothed_reductions = {}
     for col in reductions_by_year.columns:
-        top = bottom + reductions_by_year[col]
+        _, y_s = smooth_time_series(years_array, reductions_by_year[col].values, points_per_year=10)
+        smoothed_reductions[col] = y_s
+
+    reductions_s_df = pd.DataFrame(smoothed_reductions, index=x_smooth)
+
+    bands = []
+    bottom = trajectory_s.copy()
+    for col in reductions_s_df.columns:
+        top = bottom + reductions_s_df[col].values
         bands.append((col, bottom.copy(), top.copy()))
         bottom = top
 
+    # 6️⃣ Plot
     fig, ax = plt.subplots(figsize=(14, 8))
     for col, y_bottom, y_top in bands:
         color = solution_colors[col] if solution_colors and col in solution_colors else None
-        ax.fill_between(years, y_bottom, y_top, label=legend_labels.get(col, col), color=color, alpha=0.8)
+        ax.fill_between(
+            x_smooth,
+            y_bottom,
+            y_top,
+            label=legend_labels.get(col, col),
+            color=color,
+            alpha=0.8
+        )
 
-    ax.plot(emissions_by_year.index, emissions_by_year.values, color="black", linewidth=2, label="Emissions without action")
-    ax.plot(trajectory.index, trajectory.values, color="red", linewidth=2, label="Trajectory")
+    ax.plot(x_smooth, emissions_s, color="black", linewidth=2, label="Emissions without action")
+    ax.plot(x_smooth, trajectory_s, color="red", linewidth=2, label="Trajectory")
 
     ax.set_title("Annual CO₂e Emissions with and without Actions", fontsize=16, fontweight="bold")
     ax.set_xlabel("Year")
@@ -378,34 +507,44 @@ def plot_annual_emissions_reduction(
     ax.spines["right"].set_visible(False)
     ax.legend(title="Solutions", loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=10, title_fontsize=12)
 
-    if show_percentage_annotation:
+    # 7️⃣ Percentage annotations (based on original yearly data)
+    if show_percentage_annotation and len(years) > 0:
         final_year = years[-1]
         start_year = years[0]
-        without = emissions_by_year.loc[final_year]
-        without1 = emissions_by_year.loc[start_year]
-        with_action = trajectory.loc[final_year]
-        relative_percent_reduction = 100 * (1 - with_action / without)
-        absolute_percent_reduction = 100 * (1 - with_action / without1)
+
+        without_final = emissions_by_year.loc[final_year]
+        without_start = emissions_by_year.loc[start_year]
+        with_action_final = trajectory.loc[final_year]
+
+        relative_percent_reduction = (
+            100 * (1 - with_action_final / without_final) if without_final != 0 else 0
+        )
+        absolute_percent_reduction = (
+            100 * (1 - with_action_final / without_start) if without_start != 0 else 0
+        )
+
         fig.text(
             0.88, 0.52,
-            f"{relative_percent_reduction:.0f}%\nrelative_percenatge_reduction\nin {final_year}",
+            f"{relative_percent_reduction:.0f}%\nrelative_reduction\nin {final_year}",
             fontsize=12, color="red",
             ha="center", va="top",
             bbox=dict(facecolor="white", edgecolor="red", boxstyle="round,pad=0.4")
         )
         fig.text(
             0.88, 0.22,
-            f"{absolute_percent_reduction:.0f}%\nabsolute_percentage_reduction\nin {final_year}",
+            f"{absolute_percent_reduction:.0f}%\nreduction_vs_{start_year}",
             fontsize=12, color="red",
             ha="center", va="top",
             bbox=dict(facecolor="white", edgecolor="red", boxstyle="round,pad=0.4")
         )
 
+    # 8️⃣ Download
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png")
     st.download_button("📥 Download PNG", data=buffer.getvalue(), file_name="annual_emissions.png", mime="image/png")
 
     return fig
+
 
 
 
