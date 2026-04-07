@@ -517,11 +517,11 @@ with tabs[4]:
             # -------------------------------
             # Diagnostic table (human-readable)
             # -------------------------------
-            diagnostic_df_str = diagnostic_df.applymap(
-                lambda cell: ", ".join(f"{s}: {v}%" for s, v in cell)
-                if isinstance(cell, list)
-                else ""
-            )
+            # diagnostic_df_str = diagnostic_df.applymap(
+               # lambda cell: ", ".join(f"{s}: {v}%" for s, v in cell)
+#                if isinstance(cell, list)
+               # else ""
+            #)"""
 
             # -------------------------------
             # Final impact table
