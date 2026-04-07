@@ -412,7 +412,7 @@ def plot_annual_emissions_reduction(
     emissions_before_df = emissions_before_df.copy()
     emissions_before_df = emissions_before_df[
         [c for c in emissions_before_df.columns if c.startswith("Emissions_")]
-    ].applymap(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
+    ].map(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
 
     emissions_without_action = emissions_before_df.sum(axis=0)
     emissions_without_action.index = (
@@ -571,7 +571,7 @@ def prepare_waterfall_inputs(
 
     emissions_before_df = emissions_before_df.copy()
     emissions_before_df = emissions_before_df[[c for c in emissions_before_df.columns if c.startswith("Emissions_")]]
-    emissions_before_df = emissions_before_df.applymap(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
+    emissions_before_df = emissions_before_df.map(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
 
     col_start, col_target = f"Emissions_{start_year}", f"Emissions_{end_year}"
     start_value = emissions_before_df[col_start].sum() if col_start in emissions_before_df.columns else 0
