@@ -266,7 +266,7 @@ def plot_cumulative_emissions_reduction(
     emissions_before_df = emissions_before_df.copy()
     emissions_before_df = emissions_before_df[
         [c for c in emissions_before_df.columns if c.startswith("Emissions_")]
-    ].applymap(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
+    ].map(lambda x: float(str(x).replace(",", "")) if pd.notnull(x) else x).dropna(how="all")
 
     # 2️⃣ Compute baseline cumulative emissions
     emissions_without_action = emissions_before_df.sum(axis=0)
